@@ -44,6 +44,13 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
                 "Output file path for the trained compressor.");
         parser.addCommandFlag(
                 cmd(), kForce, 'f', false, "Overwrite output file.");
+        parser.addCommandFlag(
+                cmd(),
+                kLevel,
+                'l',
+                true,
+                "Compression level of the compressor to train (default: 6). "
+                "Some profiles build a different graph depending on it.");
 
         // Train Params
         parser.addCommandFlag(
@@ -151,6 +158,11 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
     explicit TrainArgs(const arg::ParsedArgs& parsed)
             : GlobalArgs(parsed), ProfileArgs(parsed)
     {
+        auto levelArg = parsed.cmdFlag(cmd(), kLevel);
+        if (levelArg) {
+            setRequestedCompressionLevel(
+                    util::checkedstoiExact(levelArg.value()));
+        }
         // Create the compressor
         setCompressor(createCompressorFromArgs(
                 *this, parsed.cmdFlag(cmd(), kCompressor)));
@@ -305,6 +317,7 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
     inline static const std::string kDictBundleOutput = "dict-bundle-output";
 
     // Train Params
+    inline static const std::string kLevel            = "level";
     inline static const std::string kTrainer          = "trainer";
     inline static const std::string kThreads          = "threads";
     inline static const std::string kNumSamples       = "num-samples";
