@@ -2,7 +2,12 @@
 
 #include "openzl/compress/selectors/selector_compress.h"
 #include "openzl/common/assertion.h"
+#include "openzl/codecs/zl_bzip3.h"
+#include "openzl/codecs/zl_deflate.h"
+#include "openzl/codecs/zl_lzma2.h"
 #include "openzl/compress/private_nodes.h" // ZS2_GRAPH_COMPRESS_*
+#include "openzl/compress/selectors/selector_brute_force.h"
+#include "openzl/zl_compress.h" // ZL_CParam_serialBackendSearch
 #include "openzl/zl_ctransform.h"
 #include "openzl/zl_data.h"
 #include "openzl/zl_graph_api.h"
@@ -64,9 +69,28 @@ ZL_GraphID SI_selector_compress_serial(
         size_t nbCustomGraphs)
 {
     ZL_ASSERT_EQ(ZL_Input_type(inputStream), ZL_Type_serial);
-    (void)selCtx;
     (void)customGraphs;
     (void)nbCustomGraphs;
+    // Experimental: when requested, arbitrate between several general purpose
+    // backends by trying each of them, and keep the smallest result.
+    const int search =
+            ZL_Selector_getCParam(selCtx, ZL_CParam_serialBackendSearch);
+    if (search > 0) {
+        ZL_GraphID candidates[4];
+        size_t nbCandidates        = 0;
+        candidates[nbCandidates++] = ZL_GRAPH_ZSTD;
+        if (search & ZL_SerialBackendSearch_deflate) {
+            candidates[nbCandidates++] = ZL_GRAPH_DEFLATE;
+        }
+        if (search & ZL_SerialBackendSearch_lzma2) {
+            candidates[nbCandidates++] = ZL_GRAPH_LZMA2;
+        }
+        if (search & ZL_SerialBackendSearch_bzip3) {
+            candidates[nbCandidates++] = ZL_GRAPH_BZIP3;
+        }
+        return SI_selector_brute_force(
+                selCtx, inputStream, candidates, nbCandidates);
+    }
     // In the future, we will probably arbitrate here between several methods.
     // Other LZ engines such as FastLZ and ROLZ come to mind.
     // Might even compete with Huffman or STORE.
