@@ -171,6 +171,24 @@ typedef enum {
     /// @default 0 currently means enabled, preserving existing behavior.
     ZL_CParam_storeOnExpansion = 12,
 
+    /// Only meaningful at CCtx level (ignored at CGraph level).
+    /// Number of threads used to compress independent successor subtrees
+    /// (typically one per column or cluster) concurrently.
+    /// 0 and 1 mean serial compression. N > 1 uses N-1 background threads
+    /// in addition to the calling thread.
+    /// The compressed output is identical whatever the value of this parameter.
+    /// Requires custom graphs, codecs and selectors to be reentrant.
+    /// Ignored when the library is built without ZL_MULTITHREAD.
+    /// @default 0 means serial compression.
+    ZL_CParam_nbWorkers = 13,
+
+    /// Only meaningful at CCtx level (ignored at CGraph level).
+    /// Minimum input size, in bytes, for a successor subtree to be compressed
+    /// by a worker thread. Smaller subtrees are compressed by the calling
+    /// thread. Only used when ZL_CParam_nbWorkers > 1.
+    /// @default 0 means ZL_MTMINTASKSIZE_DEFAULT.
+    ZL_CParam_mtMinTaskSize = 14,
+
     // Other possible parameters (ideas) :
     //  - Backup when a node errors out (continue with generic LZ, or error
     //  out)
@@ -185,6 +203,8 @@ typedef enum {
 #define ZL_COMPRESSIONLEVEL_DEFAULT 6
 #define ZL_DECOMPRESSIONLEVEL_DEFAULT 3
 #define ZL_MINSTREAMSIZE_DEFAULT 10
+#define ZL_NBWORKERS_MAX 256
+#define ZL_MTMINTASKSIZE_DEFAULT (64 << 10)
 
 /**
  * @brief Sets a global compression parameter via the CCtx.

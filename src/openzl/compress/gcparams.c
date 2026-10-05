@@ -56,8 +56,17 @@ const GCParamToName GCParams_kAllParams[] = {
     { ZL_CParam_contentChecksum, { (const char*[]){ "contentChecksum" }, 1 } },
     { ZL_CParam_storeOnExpansion,
       { (const char*[]){ "storeOnExpansion" }, 1 } },
-    { ZL_CParam_minStreamSize, { (const char*[]){ "minStreamSize" }, 1 } }
+    { ZL_CParam_minStreamSize, { (const char*[]){ "minStreamSize" }, 1 } },
+    { ZL_CParam_nbWorkers, { (const char*[]){ "nbWorkers" }, 1 } },
+    { ZL_CParam_mtMinTaskSize, { (const char*[]){ "mtMinTaskSize" }, 1 } }
 };
+
+/// Execution-only parameters: they don't influence the compressed output,
+/// so they are not serialized with a Compressor.
+static int GCParams_isExecutionParam(ZL_CParam param)
+{
+    return param == ZL_CParam_nbWorkers || param == ZL_CParam_mtMinTaskSize;
+}
 
 static ZL_Report setTernaryParam(ZL_TernaryParam* param, int value)
 {
@@ -110,6 +119,24 @@ GCParams_setParameter(GCParams* gcparams, ZL_CParam paramId, int value)
             // TODO (@Cyan): provide bounds
             gcparams->minStreamSize = (unsigned)value;
             break;
+        case ZL_CParam_nbWorkers:
+            ZL_ERR_IF(
+                    value < 0 || value > ZL_NBWORKERS_MAX,
+                    compressionParameter_invalid,
+                    "nbWorkers must be within [0, %d]: %d",
+                    ZL_NBWORKERS_MAX,
+                    value);
+            gcparams->nbWorkers = value;
+            break;
+        case ZL_CParam_mtMinTaskSize:
+            ZL_ERR_IF_LT(
+                    value,
+                    0,
+                    compressionParameter_invalid,
+                    "mtMinTaskSize must be >= 0: %d",
+                    value);
+            gcparams->mtMinTaskSize = value;
+            break;
         case ZL_CParam_formatVersion:
             if (!(value == 0 || ZL_isFormatVersionSupported((uint32_t)value)))
                 ZL_ERR(formatVersion_unsupported);
@@ -149,7 +176,8 @@ ZL_Report GCParams_resetStartingGraphID(GCParams* gcparams)
     }
 void GCParams_applyDefaults(GCParams* dst, const GCParams* defaults)
 {
-    // note: stickyParameters aren't overridden by defaults
+    // note: stickyParameters, nbWorkers and mtMinTaskSize
+    // aren't overridden by defaults (CCtx-level only)
     SET_DEFAULT(dst, defaults, compressionLevel);
     SET_DEFAULT(dst, defaults, decompressionLevel);
     SET_DEFAULT(dst, defaults, permissiveCompression);
@@ -208,6 +236,10 @@ int GCParams_getParameter(const GCParams* gcparams, ZL_CParam paramId)
             return (int)gcparams->storeOnExpansion;
         case ZL_CParam_minStreamSize:
             return (int)gcparams->minStreamSize;
+        case ZL_CParam_nbWorkers:
+            return gcparams->nbWorkers;
+        case ZL_CParam_mtMinTaskSize:
+            return gcparams->mtMinTaskSize;
         default:
             return 0;
     }
@@ -222,7 +254,10 @@ ZL_Report GCParams_forEachParam(
     ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
     for (size_t i = 0; i < ZL_ARRAY_SIZE(GCParams_kAllParams); ++i) {
         const ZL_CParam param = GCParams_kAllParams[i].param;
-        const int value       = GCParams_getParameter(gcparams, param);
+        if (GCParams_isExecutionParam(param)) {
+            continue;
+        }
+        const int value = GCParams_getParameter(gcparams, param);
         if (value != 0) {
             ZL_ERR_IF_ERR(callback(opaque, param, value));
         }
