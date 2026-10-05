@@ -3,6 +3,7 @@
 #include "openzl/compress/rtgraphs.h"
 #include "openzl/common/allocation.h" // ZL_malloc
 #include "openzl/common/assertion.h"  // ZS_ASSERT_*
+#include "openzl/common/errors_internal.h" // ZL_TRY_LET
 #include "openzl/common/limits.h"
 #include "openzl/common/logging.h" // ZL_DLOG
 #include "openzl/common/stream.h"  // ZL_Data*, STREAM_getRBuffer
@@ -393,6 +394,123 @@ RTGM_refConstBufferIntoNewStream(
 
     return ZL_WRAP_VALUE(RTGM_registerOutputStream(
             rtgraph, rtnode, rtstreamid, outcomeID, stream));
+}
+
+void RTGM_setStreamAttributes(
+        RTGraph* rtgraph,
+        RTStreamID rtstreamid,
+        ZL_IDType outcomeID,
+        unsigned protectRank)
+{
+    ZL_ASSERT_NN(rtgraph);
+    ZL_ASSERT_LT(rtstreamid.rtsid, VECTOR_SIZE(rtgraph->streams));
+    RT_CStream* const rtcs = &VECTOR_AT(rtgraph->streams, rtstreamid.rtsid);
+    rtcs->outcomeID        = outcomeID;
+    rtcs->protectRank      = protectRank;
+}
+
+static ZL_RESULT_OF(RTStreamID) RTGM_appendStoredCopy(
+        RTGraph* dst,
+        const ZL_Data* stream)
+{
+    ZL_RESULT_DECLARE_SCOPE(RTStreamID, NULL);
+    // Only the content buffer is written into the frame,
+    // see RTGM_listBuffersToStore()
+    ZL_RBuffer const content = STREAM_getRBuffer(stream);
+    ZL_Data* const copy =
+            STREAM_createInArena(dst->streamArena, RTGM_genStreamID(dst));
+    ZL_ERR_IF_NULL(copy, allocation);
+    // Reserve at least 1 byte: empty allocations may fail
+    ZL_Report const reserved = STREAM_reserve(
+            copy, ZL_Type_serial, 1, content.size ? content.size : 1);
+    if (ZL_isError(reserved)) {
+        STREAM_free(copy);
+        ZL_ERR_IF_ERR(reserved);
+    }
+    if (content.size) {
+        ZL_memcpy(STREAM_getWBuffer(copy).start, content.start, content.size);
+    }
+    ZL_Report const committed = STREAM_commit(copy, content.size);
+    if (ZL_isError(committed)) {
+        STREAM_free(copy);
+        ZL_ERR_IF_ERR(committed);
+    }
+    RT_CStream const rtcs = { .stream = copy, .toStore = 1 };
+    if (!VECTOR_PUSHBACK(dst->streams, rtcs)) {
+        STREAM_free(copy);
+        ZL_ERR(temporaryLibraryLimitation);
+    }
+    return ZL_WRAP_VALUE(
+            (RTStreamID){ (ZL_IDType)(VECTOR_SIZE(dst->streams) - 1) });
+}
+
+ZL_Report RTGM_appendSubgraph(
+        RTGraph* dst,
+        const RTGraph* src,
+        const RTStreamID* dstInputs,
+        size_t nbSrcInputs,
+        size_t headerOffset)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
+    ZL_ASSERT_NN(dst);
+    ZL_ASSERT_NN(src);
+    ZL_ASSERT_LE(nbSrcInputs, VECTOR_SIZE(src->streams));
+    size_t const base         = VECTOR_SIZE(dst->streams);
+    size_t const nbSrcStreams = VECTOR_SIZE(src->streams);
+    ZL_DLOG(BLOCK,
+            "RTGM_appendSubgraph: %zu nodes, %zu streams, at stream %zu",
+            VECTOR_SIZE(src->nodes),
+            nbSrcStreams - nbSrcInputs,
+            base);
+
+    // Streams
+    for (size_t n = nbSrcInputs; n < nbSrcStreams; n++) {
+        RT_CStream const* const srcs = &VECTOR_AT(src->streams, n);
+        if (srcs->toStore) {
+            ZL_ASSERT_NN(srcs->stream);
+            ZL_TRY_LET(
+                    RTStreamID, rtsid, RTGM_appendStoredCopy(dst, srcs->stream));
+            ZL_ASSERT_EQ(rtsid.rtsid, base + (n - nbSrcInputs));
+            VECTOR_AT(dst->streams, rtsid.rtsid).outcomeID = srcs->outcomeID;
+        } else {
+            RT_CStream const rtcs = { .outcomeID = srcs->outcomeID };
+            ZL_ERR_IF_NOT(
+                    VECTOR_PUSHBACK(dst->streams, rtcs),
+                    temporaryLibraryLimitation);
+        }
+    }
+
+    // Nodes
+    size_t const nbSrcNodes = VECTOR_SIZE(src->nodes);
+    for (size_t n = 0; n < nbSrcNodes; n++) {
+        RTNode const* const srcn = &VECTOR_AT(src->nodes, n);
+        ALLOC_ARENA_MALLOC_CHECKED(
+                RTStreamID, inRtsids, srcn->nbInputs, dst->rtsidsArena);
+        for (size_t i = 0; i < srcn->nbInputs; i++) {
+            ZL_IDType const sid = srcn->inRtsids[i].rtsid;
+            inRtsids[i]         = (sid < nbSrcInputs)
+                            ? dstInputs[sid]
+                            : (RTStreamID){ (ZL_IDType)(base + (sid - nbSrcInputs)) };
+        }
+        ZL_ASSERT_GE(srcn->startOutRtsids, nbSrcInputs);
+        RTNode node          = *srcn;
+        node.inRtsids        = inRtsids;
+        node.startOutRtsids  = (ZL_IDType)(base
+                                          + (srcn->startOutRtsids
+                                             - (ZL_IDType)nbSrcInputs));
+        node.nodeHeaderSegment.startPos += headerOffset;
+        ZL_ERR_IF_NOT(
+                VECTOR_PUSHBACK(dst->nodes, node), temporaryLibraryLimitation);
+    }
+
+    // Inputs stored by @src
+    for (size_t n = 0; n < nbSrcInputs; n++) {
+        if (VECTOR_AT(src->streams, n).toStore) {
+            RTGM_storeStream(dst, dstInputs[n]);
+        }
+    }
+
+    return ZL_returnSuccess();
 }
 
 void RTGM_storeStream(RTGraph* rtgraph, RTStreamID rtstreamid)

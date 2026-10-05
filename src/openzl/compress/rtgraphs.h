@@ -188,6 +188,27 @@ void RTGM_clearNodesFrom(RTGraph* rtgraph, unsigned nodeRank);
 // To be used _ONLY_ in specific circumstances
 void RTGM_clearRTStreamsFrom(RTGraph* rtgraph, unsigned rank);
 
+/* RTGM_appendSubgraph() :
+ * Append all nodes and streams created in @src after its first @nbSrcInputs
+ * streams, to @dst, as if they had been created directly in @dst.
+ * @src's first @nbSrcInputs streams must be references to the @dst streams
+ * listed in @dstInputs (see RTGM_refInput()).
+ * Stream and node IDs are remapped accordingly.
+ * Streams tagged for storage are copied into @dst. Other streams of @src are
+ * not transferred: they are presumed already consumed.
+ * Node header segments are shifted by @headerOffset.
+ * When @src stored one of its input streams, the corresponding @dst stream
+ * is tagged for storage too.
+ * On error, @dst may be partially modified: it's the caller's responsibility
+ * to roll it back (see RTGM_clearNodesFrom() and RTGM_clearRTStreamsFrom()).
+ */
+ZL_Report RTGM_appendSubgraph(
+        RTGraph* dst,
+        const RTGraph* src,
+        const RTStreamID* dstInputs,
+        size_t nbSrcInputs,
+        size_t headerOffset);
+
 /* =====   Methods associated to RTStreams   ===== */
 
 // RTGM_refInput() :
@@ -253,6 +274,16 @@ RTGM_refConstBufferIntoNewStream(
         size_t eltWidth,
         size_t eltCount,
         const void* ref);
+
+// RTGM_setStreamAttributes() :
+// Set the successor selection hint and the protection rank of a stream.
+// Used to mirror the attributes of a stream referenced from another RTGraph.
+// @rtsid must be valid
+void RTGM_setStreamAttributes(
+        RTGraph* rtgraph,
+        RTStreamID rtsid,
+        ZL_IDType outcomeID,
+        unsigned protectRank);
 
 // RTGM_storeStream() :
 // Tag the stream to be stored into final frame at collection stage.
