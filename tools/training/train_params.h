@@ -37,6 +37,8 @@ struct TrainParams {
     poly::optional<size_t> maxTotalSizeMb;
     bool paretoFrontier{ false };
     bool saveAceState{ false };
+    /// Experimental: let ACE also pick the deflate, lzma2 and bzip3 backends.
+    bool aceExtraBackends{ false };
     /// Existing bundle required by compressors supplied to the trainer.
     std::shared_ptr<const std::string> dictBundleData;
     /// Prune down to to this number of candidates.

@@ -8,6 +8,7 @@
 #    include "tools/ml_selector/ml_selector_trainer.h"
 #endif
 #include "tools/training/ace/ace.h"
+#include "tools/training/ace/ace_compressors.h"
 #include "tools/training/clustering/clustering_graph_trainer.h"
 #include "tools/training/dict/base_dict_trainer.h"
 #include "tools/training/graph_mutation/graph_mutation_utils.h"
@@ -30,6 +31,7 @@ std::vector<TrainedCandidate> train(
     if (!trainParams.compressorGenFunc) {
         throw Exception("Compressor generator function is not set.");
     }
+    setIncludeExtraBackends(trainParams.aceExtraBackends);
 
     const auto formatVersion = compressor.getParameter(CParam::FormatVersion);
     if (formatVersion == 0) {

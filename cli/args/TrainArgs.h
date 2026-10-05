@@ -80,6 +80,12 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
                 "Disable ACE successors during training.");
         parser.addCommandFlag(
                 cmd(),
+                kAceExtraBackends,
+                0,
+                false,
+                "Experimental: let ACE also pick the deflate, lzma2 and bzip3 backends. Slower training and compression.");
+        parser.addCommandFlag(
+                cmd(),
                 kNoClustering,
                 0,
                 false,
@@ -239,6 +245,8 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
 
         trainParams.noAceSuccessors =
                 parsed.cmdHasFlag(cmd(), kNoAceSuccessors);
+        trainParams.aceExtraBackends =
+                parsed.cmdHasFlag(cmd(), kAceExtraBackends);
 
         trainParams.noClustering = parsed.cmdHasFlag(cmd(), kNoClustering);
         trainParams.saveAceState = parsed.cmdHasFlag(cmd(), kSaveAceState);
@@ -302,6 +310,7 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
     inline static const std::string kNumSamples       = "num-samples";
     inline static const std::string kUseAllSamples    = "use-all-samples";
     inline static const std::string kNoAceSuccessors  = "no-ace-successors";
+    inline static const std::string kAceExtraBackends = "ace-extra-backends";
     inline static const std::string kNoClustering     = "no-clustering";
     inline static const std::string kMaxTimeSecs      = "max-time-secs";
     inline static const std::string kMaxFileSizeMb    = "max-file-size-mb";

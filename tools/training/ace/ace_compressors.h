@@ -13,6 +13,13 @@ namespace openzl {
 namespace training {
 constexpr size_t kDefaultMaxDepth = 10;
 
+/// Experimental: whether ACE may also pick the deflate, lzma2 and bzip3
+/// backends. Disabled by default. It must be set before ACE first uses its
+/// universe of graphs, and can't be changed afterwards.
+/// @throws if called after the universe was built with a different value.
+void setIncludeExtraBackends(bool includeExtraBackends);
+bool includeExtraBackends();
+
 /// @returns the universe of all possible nodes that ACE can use to build its
 /// compressors
 poly::span<const ACENode> getAllNodes();
