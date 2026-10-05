@@ -14,6 +14,7 @@ from collections import defaultdict
 from pathlib import Path
 
 BACKENDS = ["zstd", "deflate", "lzma2", "bzip3", "lz4"]
+REGEN_STREAM_ID = 0xFFFFFFFF
 
 
 def load_bench(path: Path) -> dict:
@@ -100,14 +101,24 @@ def load_traces(directory: Path) -> dict:
     per_backend = defaultdict(lambda: {"streams": 0, "rawSize": 0, "compressedSize": 0})
     for path in sorted(directory.glob("*.cbor")):
         trace, _ = cbor_decode(path.read_bytes())
-        for chunk in trace["chunks"]:
+        # The regenerated input of a chunk has the special ID 0xFFFFFFFF, and
+        # comes last in its list of streams. Its size accumulates over the
+        # chunks of the file, so the chunk's own size is the difference.
+        regen_end = 0
+        chunks = sorted(
+            (c for c in trace["chunks"] if c["streams"]), key=lambda c: c["chunkId"]
+        )
+        for chunk in chunks:
             streams = chunk["streams"]
+            regen_start, regen_end = regen_end, streams[-1]["contentSize"]
             for codec in chunk["codecs"]:
                 backend = backend_of(codec["name"])
                 if backend is None:
                     continue
                 sizes = [
-                    streams[s]["contentSize"]
+                    regen_end - regen_start
+                    if s == REGEN_STREAM_ID
+                    else streams[s]["contentSize"]
                     for s in codec["inputStreams"] + codec["outputStreams"]
                 ]
                 stats = per_backend[backend]
