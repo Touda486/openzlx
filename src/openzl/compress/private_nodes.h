@@ -162,6 +162,9 @@ typedef enum {
 
     ZL_PrivateStandardNodeID_lz4,
     ZL_PrivateStandardNodeID_pivco_huffman,
+    ZL_PrivateStandardNodeID_deflate,
+    ZL_PrivateStandardNodeID_lzma2,
+    ZL_PrivateStandardNodeID_bzip3,
 
     ZL_PrivateStandardNodeID_end // last id, used to detect out-of-bound enum
                                  // values

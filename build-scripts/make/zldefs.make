@@ -33,6 +33,7 @@ CFLAGS   += $(CDEBUGFLAGS) $(MOREFLAGS)
 CXXFLAGS += $(CXXDEBUGFLAGS) $(MOREFLAGS)
 LDFLAGS  += $(MOREFLAGS)
 LDLIBS   += -lm # note: to be removed from library once dependency fixed
+LDLIBS   += -lz -llzma -lbzip3 # system libraries for the deflate, lzma2 & bzip3 codecs
 CPPFLAGS += -Ideps/zstd/lib/ # "zstd.h"
 CPPFLAGS += -Ideps/lz4/lib/  # "lz4.h"
 ARFLAGS  += -c # do not print warning message when creating the archive (expected)

@@ -5,10 +5,12 @@
 #include "openzl/codecs/bitSplit/decode_bitSplit_binding.h"
 #include "openzl/codecs/bitpack/decode_bitpack_binding.h"
 #include "openzl/codecs/bitunpack/decode_bitunpack_binding.h"
+#include "openzl/codecs/bzip3/decode_bzip3_binding.h"
 #include "openzl/codecs/concat/decode_concat_binding.h"
 #include "openzl/codecs/constant/decode_constant_binding.h"
 #include "openzl/codecs/conversion/decode_conversion_binding.h"
 #include "openzl/codecs/dedup/decode_dedup_binding.h"
+#include "openzl/codecs/deflate/decode_deflate_binding.h"
 #include "openzl/codecs/delta/decode_delta_binding.h"
 #include "openzl/codecs/dispatchN_byTag/decode_dispatchN_byTag_binding.h"
 #include "openzl/codecs/dispatch_string/decode_dispatch_string_binding.h"
@@ -20,6 +22,7 @@
 #include "openzl/codecs/lz/decode_lz_binding.h"
 #include "openzl/codecs/lz/graph_lz.h"
 #include "openzl/codecs/lz4/decode_lz4_binding.h"
+#include "openzl/codecs/lzma2/decode_lzma2_binding.h"
 #include "openzl/codecs/merge_sorted/decode_merge_sorted_binding.h"
 #include "openzl/codecs/mux_lengths/decode_mux_lengths_binding.h"
 #include "openzl/codecs/mux_lengths/graph_mux_lengths.h"
@@ -140,6 +143,9 @@ const StandardDTransform SDecoders_array[ZL_StandardTransformID_end] = {
     REGISTER_TTRANSFORM_G(ZL_StandardTransformID_mux_lengths, 24, DI_MUX_LENGTHS, MUX_LENGTHS_GRAPH),
     REGISTER_TTRANSFORM_G(ZL_StandardTransformID_sparse_num, 26, DI_SPARSE_NUM, SPARSE_NUM_GRAPH),
     REGISTER_TTRANSFORM_G(ZL_StandardTransformID_pivco_huffman, 27, DI_PIVCO_HUFFMAN, PIVCO_HUFFMAN_GRAPH),
+    REGISTER_TTRANSFORM_G(ZL_StandardTransformID_deflate, 28, DI_DEFLATE, PIPE_GRAPH),
+    REGISTER_TTRANSFORM_G(ZL_StandardTransformID_lzma2, 28, DI_LZMA2, PIPE_GRAPH),
+    REGISTER_TTRANSFORM_G(ZL_StandardTransformID_bzip3, 28, DI_BZIP3, PIPE_GRAPH),
 
     REGISTER_VOTRANSFORM_G(ZL_StandardTransformID_splitn, 9, DI_SPLITN, GRAPH_VO_SERIAL),
     REGISTER_VOTRANSFORM_G(ZL_StandardTransformID_splitn_struct, 14, DI_SPLITN_STRUCT, GRAPH_VO_STRUCT),

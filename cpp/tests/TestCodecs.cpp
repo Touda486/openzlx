@@ -62,6 +62,56 @@ TEST_F(TestCodecs, lz4_hc)
     auto compressed = testRoundTrip(compressor_, Input::refSerial(data));
 }
 
+TEST_F(TestCodecs, deflate)
+{
+    std::string data(10000, 'a');
+    for (auto level : { 1, 9 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.selectStartingGraph(
+                graphs::Deflate(level).parameterize(compressor));
+        testRoundTrip(compressor, Input::refSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, lzma2)
+{
+    std::string data(10000, 'a');
+    for (auto level : { 0, 9 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.selectStartingGraph(
+                graphs::Lzma2(level).parameterize(compressor));
+        testRoundTrip(compressor, Input::refSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, bzip3)
+{
+    // 2 * 65 KiB: a multiple of the block size, which libbzip3 mishandles
+    std::string data(2 * (65 << 10), 'a');
+    for (auto blockSize : { 65 << 10, 1 << 20 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.selectStartingGraph(
+                graphs::Bzip3(blockSize).parameterize(compressor));
+        testRoundTrip(compressor, Input::refSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, newBackendsRejectedBeforeFormatVersion28)
+{
+    std::string data(10000, 'a');
+    for (auto graph : { ZL_GRAPH_DEFLATE, ZL_GRAPH_LZMA2, ZL_GRAPH_BZIP3 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, 27);
+        compressor.selectStartingGraph(graph);
+        CCtx cctx;
+        cctx.refCompressor(compressor);
+        EXPECT_ANY_THROW(cctx.compressSerial(data));
+    }
+}
+
 TEST_F(TestCodecs, lzParameters)
 {
     const auto muxLengthsGraph =
