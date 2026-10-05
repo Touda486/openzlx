@@ -64,6 +64,17 @@ class Bzip3Component : public OpenZLComponent {
                 std::string(2 * (65 << 10), 'y')));
         inputs.push_back(std::make_unique<SerialOpenZLInput>(
                 std::string(200000, 'z')));
+        // libbzip3 writes past bz3_bound() on small incompressible inputs:
+        // make sure the encoder leaves enough room.
+        for (size_t size : { 64, 100, 148, 1000, 70000 }) {
+            std::string noise(size, '\0');
+            uint32_t state = 0x9E3779B9u ^ (uint32_t)size;
+            for (auto& c : noise) {
+                state = state * 1664525u + 1013904223u;
+                c     = (char)(state >> 24);
+            }
+            inputs.push_back(std::make_unique<SerialOpenZLInput>(noise));
+        }
         return inputs;
     }
 

@@ -5,11 +5,62 @@
 #include <string.h>
 #include "openzl/codecs/bzip3/common_bzip3.h"
 #include "openzl/common/assertion.h"
-#include "openzl/shared/mem.h"
 #include "openzl/shared/utils.h"
 #include "openzl/shared/varint.h"
 
 #include <libbz3.h>
+
+/// Decompresses the blocks of @p src into @p dst, which holds @p dstSize
+/// bytes, all of which must be produced.
+static ZL_Report DI_bzip3_decompressBlocks(
+        ZL_Decoder* dic,
+        struct bz3_state* state,
+        const uint8_t* src,
+        size_t srcSize,
+        size_t blockSize,
+        uint8_t* dst,
+        size_t dstSize)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(dic);
+    // bz3_decode_block() may need up to bz3_bound(blockLen) bytes of buffer
+    const size_t scratchSize = bz3_bound(blockSize);
+    uint8_t* const scratch =
+            (uint8_t*)ZL_Decoder_getScratchSpace(dic, scratchSize);
+    ZL_ERR_IF_NULL(scratch, allocation);
+
+    const uint8_t* ip        = src;
+    const uint8_t* const end = src + srcSize;
+    for (size_t pos = 0; pos < dstSize; pos += blockSize) {
+        const size_t blockLen = ZL_MIN(blockSize, dstSize - pos);
+        ZL_TRY_LET_CONST(uint64_t, tag, ZL_varintDecode(&ip, end));
+        const int isRaw          = (int)(tag & 1);
+        const uint64_t blockSrc  = tag >> 1;
+        ZL_ERR_IF_GT(blockSrc, (uint64_t)(end - ip), corruption);
+        const size_t payloadSize = (size_t)blockSrc;
+        if (isRaw) {
+            ZL_ERR_IF_NE(payloadSize, blockLen, corruption);
+            memcpy(dst + pos, ip, blockLen);
+        } else {
+            ZL_ERR_IF_GE(payloadSize, blockLen, corruption);
+            memcpy(scratch, ip, payloadSize);
+            const int32_t decodedSize = bz3_decode_block(
+                    state,
+                    scratch,
+                    scratchSize,
+                    (int32_t)payloadSize,
+                    (int32_t)blockLen);
+            ZL_ERR_IF_NE(
+                    (int64_t)decodedSize,
+                    (int64_t)blockLen,
+                    corruption,
+                    "bz3_decode_block failed");
+            memcpy(dst + pos, scratch, blockLen);
+        }
+        ip += payloadSize;
+    }
+    ZL_ERR_IF(ip != end, corruption, "Trailing payload bytes");
+    return ZL_returnSuccess();
+}
 
 ZL_Report DI_bzip3(ZL_Decoder* dic, const ZL_Input* ins[])
 {
@@ -19,19 +70,29 @@ ZL_Report DI_bzip3(ZL_Decoder* dic, const ZL_Input* ins[])
 
     const ZL_Input* in = ins[0];
     size_t inSize      = ZL_Input_numElts(in);
-    const uint8_t* src = (const uint8_t*)ZL_Input_ptr(in);
 
-    // Read the original size from the header
+    // Read the original size and the block size from the header
     ZL_RBuffer const header = ZL_Decoder_getCodecHeader(dic);
     ZL_ERR_IF_EQ(header.size, 0, corruption, "No header provided");
     const uint8_t* headerStart = (const uint8_t*)header.start;
     const uint8_t* headerEnd   = (const uint8_t*)header.start + header.size;
     ZL_TRY_LET_CONST(
             uint64_t, outSize, ZL_varintDecode(&headerStart, headerEnd));
+    ZL_TRY_LET_CONST(
+            uint64_t, blockSize, ZL_varintDecode(&headerStart, headerEnd));
     ZL_ERR_IF(headerStart != headerEnd, corruption, "Trailing header bytes");
 #if SIZE_MAX < UINT64_MAX
     ZL_ERR_IF_GT(outSize, SIZE_MAX, corruption);
 #endif
+    // The encoder never uses a block larger than the output, which bounds the
+    // memory a corrupted header can request.
+    ZL_ERR_IF_LT(blockSize, ZL_BZIP3_MIN_BLOCK_SIZE, corruption);
+    ZL_ERR_IF_GT(blockSize, ZL_BZIP3_MAX_BLOCK_SIZE, corruption);
+    ZL_ERR_IF_GT(
+            blockSize,
+            ZL_MAX(outSize, (uint64_t)ZL_BZIP3_MIN_BLOCK_SIZE),
+            corruption,
+            "Block size larger than the output");
 
     // Allocate the output buffer
     ZL_Output* const out =
@@ -44,28 +105,20 @@ ZL_Report DI_bzip3(ZL_Decoder* dic, const ZL_Input* ins[])
         return ZL_returnSuccess();
     }
 
-    // bz3_decompress() allocates working memory proportional to the block
-    // size declared in the frame. The encoder never requests a block larger
-    // than the input (+1 byte, see the encoder), and libbzip3 then declares
-    // at most bz3_bound() of that. Reject larger blocks before libbzip3
-    // allocates anything.
-    ZL_ERR_IF_LT(inSize, ZL_BZIP3_FRAME_HEADER_SIZE, corruption);
-    ZL_ERR_IF_NE(memcmp(src, "BZ3v1", 5), 0, corruption, "Bad bzip3 magic");
-    const size_t blockSize = (size_t)ZL_readLE32(src + 5);
-    ZL_ERR_IF_LT(blockSize, ZL_BZIP3_MIN_BLOCK_SIZE, corruption);
-    ZL_ERR_IF_GT(
-            blockSize,
-            ZL_MAX(bz3_bound((size_t)outSize + 1), ZL_BZIP3_MIN_BLOCK_SIZE),
-            corruption,
-            "Block size larger than the output");
-
     // Do the decompression
-    size_t decompressedSize = (size_t)outSize;
-    const int ret           = bz3_decompress(
-            src, (uint8_t*)ZL_Output_ptr(out), inSize, &decompressedSize);
-    ZL_ERR_IF_NE(ret, BZ3_OK, corruption, "bz3_decompress failed");
-    ZL_ERR_IF_NE(decompressedSize, outSize, corruption, "Size mismatch");
-    ZL_ERR_IF_ERR(ZL_Output_commit(out, decompressedSize));
+    struct bz3_state* const state = bz3_new((int32_t)blockSize);
+    ZL_ERR_IF_NULL(state, allocation);
+    const ZL_Report report = DI_bzip3_decompressBlocks(
+            dic,
+            state,
+            (const uint8_t*)ZL_Input_ptr(in),
+            inSize,
+            (size_t)blockSize,
+            (uint8_t*)ZL_Output_ptr(out),
+            (size_t)outSize);
+    bz3_free(state);
+    ZL_ERR_IF_ERR(report);
+    ZL_ERR_IF_ERR(ZL_Output_commit(out, (size_t)outSize));
 
     return ZL_returnSuccess();
 }
