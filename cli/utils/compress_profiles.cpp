@@ -48,6 +48,11 @@ void ProfileArgs::addArgs(arg::ArgParser& parser)
             0,
             true,
             "The chunk size for the input to be separated into (e.g. 20M, 500K, 1G). Supports suffixes: K/KB (10^3), M/MB (10^6), G/GB (10^9), T/TB (10^12), and binary KiB (2^10), MiB (2^20), GiB (2^30), TiB (2^40). Plain numbers are treated as bytes. When omitted, profiles use their built-in default chunk size if they segment input.");
+    parser.addGlobalFlag(
+            kSerialBackendSearch,
+            0,
+            true,
+            "Experimental: bitmask of extra backends that the generic serial compressor tries next to zstd, keeping the smallest result (1=deflate, 2=lzma2, 4=bzip3, 7=all). Default: 0, always zstd.");
 }
 
 ProfileArgs::ProfileArgs(const arg::ParsedArgs& parsed)
@@ -57,6 +62,11 @@ ProfileArgs::ProfileArgs(const arg::ParsedArgs& parsed)
         chunkSize_ = util::checkedstoul(chunkSize.value());
     } else {
         chunkSize_ = poly::nullopt;
+    }
+    auto serialBackendSearch = parsed.globalFlag(kSerialBackendSearch);
+    if (serialBackendSearch.has_value()) {
+        serialBackendSearch_ =
+                util::checkedstoiExact(serialBackendSearch.value());
     }
     auto profileArg = parsed.globalFlag(kProfileArg);
     if (profileArg) {
@@ -393,6 +403,44 @@ compressProfiles()
                 },
                 nullptr,
                 false);
+
+        const std::string kGeneric = "generic";
+        mp[kGeneric]               = std::make_shared<CompressProfile>(
+                kGeneric,
+                "Generic compression (zstd for serial data). Pair with --serial-backend-search to let it pick other backends.",
+                [](ZL_Compressor* compressor, void*, const ProfileArgs& args) {
+                    size_t chunkSize = args.chunkSize().value_or(
+                            ZL_DEFAULT_SEGMENTER_CHUNK_BYTE_SIZE);
+                    return ZL_Compressor_buildSerialSegmenter(
+                            compressor, chunkSize, ZL_GRAPH_COMPRESS_GENERIC);
+                },
+                nullptr,
+                true);
+
+        // Single backend profiles, mostly useful as reference points.
+        // The global compression level (-l) is forwarded to the backend.
+        const std::pair<std::string, ZL_GraphID> kBackends[] = {
+            { "zstd-plain", ZL_GRAPH_ZSTD },   { "lz4", ZL_GRAPH_LZ4 },
+            { "deflate", ZL_GRAPH_DEFLATE }, { "lzma2", ZL_GRAPH_LZMA2 },
+            { "bzip3", ZL_GRAPH_BZIP3 },
+        };
+        for (const auto& [name, graph] : kBackends) {
+            mp[name] = std::make_shared<CompressProfile>(
+                    name,
+                    "Compress the whole input with the " + name
+                            + " backend only. With --chunk-size, each chunk is compressed independently.",
+                    [graph](ZL_Compressor* compressor,
+                            void*,
+                            const ProfileArgs& args) {
+                        if (!args.chunkSize()) {
+                            return graph;
+                        }
+                        return ZL_Compressor_buildSerialSegmenter(
+                                compressor, args.chunkSize().value(), graph);
+                    },
+                    nullptr,
+                    true);
+        }
 
         std::string kPytorchName = "pytorch";
         mp[kPytorchName]         = std::make_shared<CompressProfile>(

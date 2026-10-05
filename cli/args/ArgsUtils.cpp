@@ -74,6 +74,11 @@ std::unique_ptr<Compressor> createCompressorFromArgs(
                 CParam::CompressionLevel,
                 profileArgs.requestedCompressionLevel().value());
     }
+    if (profileArgs.serialBackendSearch()) {
+        compressor->setParameter(
+                CParam::SerialBackendSearch,
+                profileArgs.serialBackendSearch().value());
+    }
     return compressor;
 }
 } // namespace cli
