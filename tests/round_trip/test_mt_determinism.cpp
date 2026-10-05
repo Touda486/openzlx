@@ -10,10 +10,13 @@
 
 #include <gtest/gtest.h>
 
+#include "openzl/codecs/zl_bzip3.h"
 #include "openzl/codecs/zl_conversion.h"
+#include "openzl/codecs/zl_deflate.h"
 #include "openzl/codecs/zl_entropy.h"
 #include "openzl/codecs/zl_field_lz.h"
 #include "openzl/codecs/zl_generic.h"
+#include "openzl/codecs/zl_lzma2.h"
 #include "openzl/codecs/zl_split.h"
 #include "openzl/codecs/zl_zstd.h"
 #include "openzl/common/threading.h" // ZL_MULTITHREAD
@@ -248,6 +251,37 @@ TEST_F(MTDeterminismTest, ManySmallSuccessors)
     sizes.back() = 0;
     select(split(sizes, successors));
     Outcome const serial = testAllConfigs(genData(100000, 2), false, true);
+    EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+}
+
+TEST_F(MTDeterminismTest, ExtraBackends)
+{
+    select(split(
+            { 150000, 150000, 150000, 0 },
+            { ZL_GRAPH_DEFLATE,
+              ZL_GRAPH_LZMA2,
+              ZL_GRAPH_BZIP3,
+              ZL_GRAPH_COMPRESS_GENERIC }));
+    std::string const src = genData(600000, 7);
+    Outcome const serial  = testAllConfigs(src, false, true);
+    EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+}
+
+TEST_F(MTDeterminismTest, SerialBackendSearch)
+{
+    // Each successor tries all backends with tryGraph(), within its worker
+    ASSERT_FALSE(ZL_isError(ZL_Compressor_setParameter(
+            compressor_,
+            ZL_CParam_serialBackendSearch,
+            ZL_SerialBackendSearch_all)));
+    select(split(
+            { 120000, 120000, 120000, 0 },
+            { ZL_GRAPH_COMPRESS_GENERIC,
+              ZL_GRAPH_COMPRESS_GENERIC,
+              ZL_GRAPH_COMPRESS_GENERIC,
+              ZL_GRAPH_COMPRESS_GENERIC }));
+    std::string const src = genData(480000, 8);
+    Outcome const serial  = testAllConfigs(src, false, true);
     EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
 }
 
