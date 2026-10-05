@@ -1861,9 +1861,6 @@ static int CCTX_runSuccessorsMT(
     }
     int const synchronous = (cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS) != 0;
     unsigned const nbWorkers = (unsigned)cctx->appliedGCParams.nbWorkers;
-    if (!synchronous && ZL_isError(CCTX_ensureThreadPool(cctx, nbWorkers - 1))) {
-        return 0;
-    }
     CCTX_SubtreeTask* const tasks =
             ZL_calloc(nbSuccessors * sizeof(CCTX_SubtreeTask));
     if (tasks == NULL) {
@@ -1871,7 +1868,9 @@ static int CCTX_runSuccessorsMT(
     }
     if (CCTX_selectOffloadedSuccessors(
                 cctx, successorArray, nbSuccessors, tasks)
-        == 0) {
+                == 0
+        || (!synchronous
+            && ZL_isError(CCTX_ensureThreadPool(cctx, nbWorkers - 1)))) {
         ZL_free(tasks);
         return 0;
     }
