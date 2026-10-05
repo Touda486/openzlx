@@ -722,6 +722,65 @@ class InvalidChunkSizeTest(unittest.TestCase):
         self.assertNotEqual(result, 0, "CLI should reject invalid suffix 'XYZ'")
 
 
+class ThreadsTest(unittest.TestCase):
+    """
+    Test that --threads doesn't change the compressed output.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmpdir, True))
+
+    def _check_threads(self, input_path: str, profile: str, extra_args: str = ""):
+        name = os.path.basename(input_path)
+        outputs = []
+        for threads in (1, 2, 4, 8):
+            compressed_path = os.path.join(self.tmpdir, f"{name}.T{threads}.zl")
+            result = command_utils.execute_command(
+                f"compress {input_path} --profile {profile} "
+                f"-o {compressed_path} -f --threads {threads} {extra_args}"
+            )
+            self.assertEqual(result, 0, f"compression failed with {threads} threads")
+            outputs.append(compressed_path)
+        for path in outputs[1:]:
+            self.assertTrue(
+                file_contents_match(outputs[0], path),
+                f"--threads changed the compressed output of {name} ({path})",
+            )
+        decompressed_path = os.path.join(self.tmpdir, f"{name}.decompressed")
+        result = command_utils.execute_command(
+            f"decompress {outputs[-1]} -o {decompressed_path} -f"
+        )
+        self.assertEqual(result, 0, "decompression failed")
+        self.assertTrue(file_contents_match(input_path, decompressed_path))
+
+    def test_sample_files(self):
+        for profile, dir_name in (
+            ("csv", "csv"),
+            ("parquet", "parquet"),
+            ("serial", "serial"),
+            ("le-u16", "u16"),
+        ):
+            sample_dir = input_dir_path(dir_name)
+            for name in sorted(os.listdir(sample_dir)):
+                with self.subTest(profile=profile, file=name):
+                    self._check_threads(os.path.join(sample_dir, name), profile)
+
+    def test_large_csv(self):
+        # Large enough for columns to be compressed by worker threads
+        csv_path = os.path.join(self.tmpdir, "large.csv")
+        with open(csv_path, "w") as f:
+            f.write("id,timestamp,city,price,status\n")
+            cities = ("Tokyo", "Osaka", "Nagoya", "Sapporo", "Fukuoka")
+            for i in range(200000):
+                f.write(
+                    f"{i},{1700000000 + 7 * i + (i * 31) % 5},{cities[(i * 7) % 5]},"
+                    f"{(i * 2654435761) % 100000 / 100:.2f},{'ok' if i % 3 else 'fail'}\n"
+                )
+        self._check_threads(csv_path, "csv")
+        self._check_threads(csv_path, "csv", "--chunk-size 1M")
+
+
 class VersionTest(unittest.TestCase):
     """Test that --version and -V flags work correctly."""
 
