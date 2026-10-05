@@ -34,6 +34,17 @@ CXXFLAGS += $(CXXDEBUGFLAGS) $(MOREFLAGS)
 LDFLAGS  += $(MOREFLAGS)
 LDLIBS   += -lm # note: to be removed from library once dependency fixed
 LDLIBS   += -lz -llzma -lbzip3 # system libraries for the deflate, lzma2 & bzip3 codecs
+
+# Multi-threaded compression (ZL_CParam_nbWorkers)
+# ZL_MULTITHREAD=0 disables it, and removes the dependency on pthreads
+ZL_MULTITHREAD ?= 1
+ifeq ($(ZL_MULTITHREAD),0)
+    CPPFLAGS += -DZL_MULTITHREAD=0
+else ifneq ($(OS),Windows_NT)
+    CFLAGS   += -pthread
+    CXXFLAGS += -pthread
+    LDLIBS   += -pthread
+endif
 CPPFLAGS += -Ideps/zstd/lib/ # "zstd.h"
 CPPFLAGS += -Ideps/lz4/lib/  # "lz4.h"
 ARFLAGS  += -c # do not print warning message when creating the archive (expected)
@@ -58,6 +69,11 @@ ifeq ($(BUILD_TYPE),DEV)
     CFLAGS += $(SANITIZER_FLAGS)
     CXXFLAGS += $(SANITIZER_FLAGS)
     LDFLAGS += $(SANITIZER_FLAGS)
+else ifeq ($(BUILD_TYPE),DEV_TSAN)
+    CFLAGS += -g -O1 -fsanitize=thread
+    CXXFLAGS += -g -O1 -fsanitize=thread
+    CPPFLAGS += -DZL_ENABLE_ASSERT
+    LDFLAGS += -fsanitize=thread
 else ifeq ($(BUILD_TYPE),DEV_NOSAN)
     CFLAGS += -g -O0
     CXXFLAGS += -g -O0
@@ -103,7 +119,7 @@ else ifeq ($(BUILD_TYPE),BASELINE)
 else ifeq ($(BUILD_TYPE),ADAPTIVE)
 # ADAPTIVE mode: baseline flags, targets add their own optimizations
 else
-    $(error Invalid BUILD_TYPE: $(BUILD_TYPE). Valid options: ADAPTIVE, OPT, BASELINE, OPT_ASAN, DBGO, DBGO_ASAN, DEV, DEV_NOSAN, TRACES, TRACES_NOSAN)
+    $(error Invalid BUILD_TYPE: $(BUILD_TYPE). Valid options: ADAPTIVE, OPT, BASELINE, OPT_ASAN, DBGO, DBGO_ASAN, DEV, DEV_NOSAN, DEV_TSAN, TRACES, TRACES_NOSAN)
 endif
 
 # position user flags at the end, so that they have higher priority

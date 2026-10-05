@@ -107,6 +107,46 @@ bool ZL_OC_markAsWarning(ZL_OperationContext* opCtx, ZL_Error error)
     return VECTOR_PUSHBACK(opCtx->warnings, error);
 }
 
+void ZL_OC_adoptErrorsAndWarnings(
+        ZL_OperationContext* dst,
+        ZL_OperationContext* src)
+{
+    if (dst == NULL || src == NULL) {
+        return;
+    }
+    // ZL_DynamicErrorInfo don't reference their operation context,
+    // so ownership can simply be moved.
+    size_t const nbInfos = VECTOR_SIZE(src->errorInfos);
+    for (size_t i = 0; i < nbInfos; i++) {
+        ZL_DynamicErrorInfo* const dy = VECTOR_AT(src->errorInfos, i);
+        if (!VECTOR_PUSHBACK(dst->errorInfos, dy)) {
+            // @dst is full: drop the remaining infos,
+            // and the warnings which reference them.
+            for (size_t w = 0; w < VECTOR_SIZE(src->warnings); w++) {
+                for (size_t j = i; j < nbInfos; j++) {
+                    if (ZL_E_dy(VECTOR_AT(src->warnings, w))
+                        == VECTOR_AT(src->errorInfos, j)) {
+                        VECTOR_AT(src->warnings, w) = ZL_E_EMPTY;
+                        break;
+                    }
+                }
+            }
+            for (size_t j = i; j < nbInfos; j++) {
+                ZL_DEE_free(VECTOR_AT(src->errorInfos, j));
+            }
+            break;
+        }
+    }
+    VECTOR_CLEAR(src->errorInfos);
+    for (size_t w = 0; w < VECTOR_SIZE(src->warnings); w++) {
+        ZL_Error const warning = VECTOR_AT(src->warnings, w);
+        if (ZL_E_isError(warning)) {
+            (void)VECTOR_PUSHBACK(dst->warnings, warning);
+        }
+    }
+    VECTOR_CLEAR(src->warnings);
+}
+
 void ZL_OC_clearErrors(ZL_OperationContext* opCtx)
 {
     if (opCtx == NULL) {

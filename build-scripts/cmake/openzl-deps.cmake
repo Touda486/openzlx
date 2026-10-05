@@ -8,6 +8,14 @@ if (OPENZL_SANITIZE_ADDRESS)
     endif()
 endif()
 
+if (OPENZL_SANITIZE_THREAD)
+    if (("${CMAKE_CXX_COMPILER_ID}" MATCHES GNU) OR ("${CMAKE_CXX_COMPILER_ID}" MATCHES Clang))
+        set(OPENZL_SANITIZE_THREAD ON)
+        set(OPENZL_TSAN_FLAGS -fsanitize=thread)
+        list(APPEND OPENZL_COMMON_FLAGS ${OPENZL_TSAN_FLAGS})
+    endif()
+endif()
+
 if (OPENZL_SANITIZE_MEMORY)
     if (("${CMAKE_CXX_COMPILER_ID}" MATCHES GNU) OR ("${CMAKE_CXX_COMPILER_ID}" MATCHES Clang))
         set(OPENZL_SANITIZE_MEMORY ON)
@@ -209,8 +217,7 @@ if(MATH_LIBRARY)
     list(APPEND OPENZL_LINK_LIBRARIES m)
 endif()
 
-# We aren't currently using pthreads, but we expect to, so lets just include it
-# now.
+# pthreads are used by multi-threaded compression (see OPENZL_MULTITHREAD).
 # Add it after Zstd because it is incorrectly not linking against Threads
 set(CMAKE_THREAD_PREFER_PTHREAD ON)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -227,4 +234,5 @@ target_link_libraries(openzl_deps INTERFACE
     ${OPENZL_LINK_LIBRARIES}
     ${OPENZL_ASAN_FLAGS}
     ${OPENZL_MSAN_FLAGS}
+    ${OPENZL_TSAN_FLAGS}
 )

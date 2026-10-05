@@ -69,7 +69,8 @@ CCtx createCompressionContext(
         const Compressor& compressor,
         int formatVersion,
         const std::optional<int>& level,
-        bool strict)
+        bool strict,
+        int threads)
 {
     // create compression context
     CCtx cctx;
@@ -84,6 +85,7 @@ CCtx createCompressionContext(
     if (level.has_value()) {
         cctx.setParameter(CParam::CompressionLevel, level.value());
     }
+    cctx.setParameter(CParam::NbWorkers, threads);
     cctx.refCompressor(compressor);
 
     return cctx;
@@ -103,7 +105,11 @@ BenchmarkResult runCompressionBenchmarks(const BenchmarkArgs& args)
 
     // create compressor, context, and decompression context
     auto cctx = createCompressionContext(
-            *args.compressor(), args.formatVersion, args.level, args.strict);
+            *args.compressor(),
+            args.formatVersion,
+            args.level,
+            args.strict,
+            args.threads);
     std::optional<FatBundleDictLoader> fatBundleLoader;
     DCtx dctx;
 

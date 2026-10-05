@@ -84,6 +84,16 @@ typedef struct {
     /// 1: Keep parameters sticky across sessions
     /// Only meaningful at CCtx level, ignored at CGraph level
     int stickyParameters;
+    /// Number of threads for successor-level parallel compression
+    /// 0 or 1 (default): serial compression
+    /// Only meaningful at CCtx level, ignored at CGraph level.
+    /// Not visible to graphs, selectors and codecs (CCTX_getAppliedGParam()
+    /// returns 0), so that their decisions cannot depend on it.
+    int nbWorkers;
+    /// Minimum input size of a successor subtree to be offloaded to a worker
+    /// 0 (default): ZL_MTMINTASKSIZE_DEFAULT
+    /// Only meaningful at CCtx level, ignored at CGraph level.
+    int mtMinTaskSize;
 
     /// Internal flag indicating if explicit starting graph is set
     /// 0: Use default graph selection

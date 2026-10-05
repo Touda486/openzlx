@@ -81,6 +81,14 @@ ZL_DynamicErrorInfo* ZL_OC_setError(ZL_OperationContext* opCtx);
 /// failure in the underlying storage).
 bool ZL_OC_markAsWarning(ZL_OperationContext* opCtx, ZL_Error error);
 
+/// Transfers ownership of all errors and warnings of @p src to @p dst.
+/// Warnings are appended to @p dst's warnings, in order.
+/// @p src is left without errors nor warnings.
+/// Used to merge the outcome of a derived context back into its parent.
+void ZL_OC_adoptErrorsAndWarnings(
+        ZL_OperationContext* dst,
+        ZL_OperationContext* src);
+
 /// Clear the error flag on the operation context, and reset the
 /// ZL_DynamicErrorInfo.
 void ZL_OC_clearErrors(ZL_OperationContext* opCtx);

@@ -21,6 +21,7 @@ option(OPENZL_BUILD_PARQUET_TOOLS "Build with parquet tools" OFF)
 option(OPENZL_BUILD_PYTHON_EXT "Build Python extension" ${OPENZL_BUILD_ALL})
 option(OPENZL_BUILD_PYTHON_EXT_TESTS "Build Python extension tests" ${OPENZL_BUILD_TESTS})
 option(OPENZL_ALLOW_INTROSPECTION "Allow introspection" ON)
+option(OPENZL_MULTITHREAD "Support multi-threaded compression (ZL_CParam_nbWorkers)" ON)
 option(OPENZL_INSTALL "Install OpenZL" ON)
 option(OPENZL_CPP_INSTALL "Install C++ bindings" ${OPENZL_INSTALL})
 option(OPENZL_BUILD_PYTHON_DEMO "Build openzl_demo Python extension" ${OPENZL_BUILD_ALL})
@@ -136,6 +137,9 @@ endif()
 
 # Select appropriate compiler configuration
 set(ZL_ALLOW_INTROSPECTION ${OPENZL_ALLOW_INTROSPECTION})
+if (NOT OPENZL_MULTITHREAD)
+    add_compile_definitions(ZL_MULTITHREAD=0)
+endif()
 
 if (WIN32 AND (MSVC OR
               (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC") OR

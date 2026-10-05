@@ -69,6 +69,14 @@ struct BenchmarkArgs : public GlobalArgs, public ProfileArgs {
                 true,
                 "Target format version for benchmarking. If not provided, "
                 "defaults to the maximum supported format version.");
+        parser.addCommandFlag(
+                cmd(),
+                kThreads,
+                'T',
+                true,
+                "Number of threads used to compress independent streams "
+                "(e.g. columns) in parallel. The compressed output doesn't "
+                "depend on it (default: 1).");
     }
 
     explicit BenchmarkArgs(const arg::ParsedArgs& parsed)
@@ -110,6 +118,15 @@ struct BenchmarkArgs : public GlobalArgs, public ProfileArgs {
             numIters = util::checkedstoi(numItersArg.value());
         }
         strict = parsed.cmdHasFlag(Cmd::BENCHMARK, kStrict);
+        if (parsed.cmdHasFlag(cmd(), kThreads)) {
+            threads = util::checkedstoiExact(
+                    parsed.cmdFlag(cmd(), kThreads).value());
+            if (threads < 1 || threads > ZL_NBWORKERS_MAX) {
+                throw InvalidArgsException(
+                        "--threads must be between 1 and "
+                        + std::to_string(ZL_NBWORKERS_MAX));
+            }
+        }
     }
 
     explicit BenchmarkArgs(
@@ -134,6 +151,8 @@ struct BenchmarkArgs : public GlobalArgs, public ProfileArgs {
 
     int formatVersion = ZL_MAX_FORMAT_VERSION;
 
+    int threads = 1;
+
     std::string dictBundleData;
 
    private:
@@ -142,6 +161,7 @@ struct BenchmarkArgs : public GlobalArgs, public ProfileArgs {
     inline static const std::string kCompressor = "compressor";
 
     inline static const std::string kLevel         = "level";
+    inline static const std::string kThreads       = "threads";
     inline static const std::string kStrict        = "strict";
     inline static const std::string kNumIters      = "num-iters";
     inline static const std::string kDictBundle    = "dict-bundle";

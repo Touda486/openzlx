@@ -16,5 +16,7 @@ enum class CParam {
     StoreOnExpansion      = ZL_CParam_storeOnExpansion,
     MinStreamSize         = ZL_CParam_minStreamSize,
     SerialBackendSearch   = ZL_CParam_serialBackendSearch,
+    NbWorkers             = ZL_CParam_nbWorkers,
+    MtMinTaskSize         = ZL_CParam_mtMinTaskSize,
 };
 }

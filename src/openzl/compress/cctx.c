@@ -12,6 +12,7 @@
 #include "openzl/common/logging.h" // ZL_LOG
 #include "openzl/common/operation_context.h"
 #include "openzl/common/stream.h"               // STREAM_*
+#include "openzl/common/threading.h"            // ZL_ThreadPool
 #include "openzl/common/vector.h"               // VECTOR_*
 #include "openzl/compress/cctx.h"               // ZS2_CCtx_*
 #include "openzl/compress/cgraph.h"             // CGRAPH_*
@@ -131,6 +132,8 @@ static size_t CCTX_TransformHeaders_sizeof(const CCTX_TransformHeaders* headers)
 // CCtx Lifetime management
 // --------------------------
 
+DECLARE_VECTOR_POINTERS_TYPE(ZL_CCtx)
+
 // Note: typedef'd to ZL_CCtx within zs2_compress.h
 struct ZL_CCtx_s {
     const ZL_Compressor* cgraph;
@@ -163,6 +166,14 @@ struct ZL_CCtx_s {
     ZL_OperationContext opCtx;
     int inBackupMode; // tracks when graph is in backup mode, to avoid looping
     unsigned segmenterDepth; // 0 until a segmenter starts, then its depth
+    /* Multi-threading, see CCTX_runSuccessorsMT() */
+    ZL_ThreadPool* pool; // owned; lazily created
+    VECTOR_POINTERS(ZL_CCtx) idleChildren; // owned; reusable worker contexts
+    ZL_DataArenaType dataArenaType;        // forwarded to worker contexts
+    unsigned mtTestingFlags;               // CCTX_MT_* flags
+    CCTX_MTStats mtStats;                  // current compression
+    bool isWorkerChild;  // compresses a single successor for a parent context
+    bool fanOutDisabled; // never compress successors in parallel
 };
 
 static ZL_Report CCTX_init(ZL_CCtx* cctx)
@@ -185,6 +196,8 @@ static ZL_Report CCTX_init(ZL_CCtx* cctx)
     TRS_init(&cctx->cachedCodecStates);
     CCTX_TransformHeaders_init(&cctx->trHeaders);
     cctx->tryGraphCodecOutputCacheMaxBytes = 0;
+    VECTOR_INIT(cctx->idleChildren, 1 << 16);
+    cctx->dataArenaType = ZL_DataArenaType_heap;
 
     return ZL_returnSuccess();
 }
@@ -233,6 +246,12 @@ void CCTX_free(ZL_CCtx* cctx)
 {
     if (cctx == NULL)
         return;
+    // No job can be in flight at this point
+    ZL_ThreadPool_free(cctx->pool);
+    for (size_t n = 0; n < VECTOR_SIZE(cctx->idleChildren); n++) {
+        CCTX_free(VECTOR_AT(cctx->idleChildren, n));
+    }
+    VECTOR_DESTROY(cctx->idleChildren);
     TRS_destroy(&cctx->cachedCodecStates);
     CodecCache_free(cctx->tryGraphCodecOutputCache);
     ZL_Compressor_free(cctx->internal_cgraph);
@@ -253,7 +272,11 @@ void CCTX_free(ZL_CCtx* cctx)
 ZL_Report ZL_CCtx_setDataArena(ZL_CCtx* cctx, ZL_DataArenaType sat)
 {
     ZL_ASSERT_NN(cctx);
-    return RTGM_setStreamArenaType(&cctx->rtgraph, sat);
+    ZL_Report const r = RTGM_setStreamArenaType(&cctx->rtgraph, sat);
+    if (!ZL_isError(r)) {
+        cctx->dataArenaType = sat;
+    }
+    return r;
 }
 
 ZL_Report ZL_CCtx_attachIntrospectionHooks(
@@ -311,7 +334,25 @@ ZL_Report ZL_CCtx_selectStartingGraphID(
 int CCTX_getAppliedGParam(const ZL_CCtx* cctx, ZL_CParam gcparam)
 {
     ZL_ASSERT_NN(cctx);
+    // Execution parameters are hidden from Graphs, Selectors and Codecs,
+    // so that their decisions, hence the compressed output,
+    // cannot depend on them.
+    if (gcparam == ZL_CParam_nbWorkers || gcparam == ZL_CParam_mtMinTaskSize) {
+        return 0;
+    }
     return GCParams_getParameter(&cctx->appliedGCParams, gcparam);
+}
+
+void CCTX_setMTTestingFlags(ZL_CCtx* cctx, unsigned flags)
+{
+    ZL_ASSERT_NN(cctx);
+    cctx->mtTestingFlags = flags;
+}
+
+CCTX_MTStats CCTX_getMTStats(const ZL_CCtx* cctx)
+{
+    ZL_ASSERT_NN(cctx);
+    return cctx->mtStats;
 }
 
 unsigned CCTX_getSegmenterDepth(const ZL_CCtx* cctx)
@@ -853,6 +894,13 @@ static void GCTX_getSuccessors(
     }
 }
 
+static int CCTX_runSuccessorsMT(
+        ZL_CCtx* cctx,
+        const SuccessorInfo* successorArray,
+        size_t nbSuccessors,
+        unsigned depth,
+        ZL_Report* result);
+
 /* Invoked from CCTX_runGraph_internal() */
 static ZL_Report CCTX_runSuccessors(
         ZL_CCtx* cctx,
@@ -862,6 +910,13 @@ static ZL_Report CCTX_runSuccessors(
 {
     ZL_RESULT_DECLARE_SCOPE_REPORT(cctx);
     ZL_DLOG(SEQ, "CCTX_runSuccessors on %zu successors", nbSuccessors);
+    {
+        ZL_Report mtResult;
+        if (CCTX_runSuccessorsMT(
+                    cctx, successorArray, nbSuccessors, depth, &mtResult)) {
+            return mtResult;
+        }
+    }
     for (size_t n = 0; n < nbSuccessors; n++) {
         const SuccessorInfo* const si = successorArray + n;
         ZL_ERR_IF_ERR(CCTX_runSuccessor(
@@ -1372,6 +1427,41 @@ static ZL_Report CCTX_runSuccessor_internal(
     return CCTX_triggerBackupMode(cctx, rtsids, nbInputs, depth);
 }
 
+/* A segmenter is allowed if it is not run inside a segmenter, and not run
+ * after nodes are executed. */
+static int CCTX_isSegmentable(
+        const ZL_CCtx* cctx,
+        const RTStreamID* rtInputs,
+        size_t nbInputs)
+{
+    return !cctx->isWorkerChild && rtInputs[0].rtsid == 0
+            && nbInputs == cctx->nbInputs && cctx->numSegments == 0
+            && cctx->segmenterDepth == 0
+            && RTGM_getNbNodes(&cctx->rtgraph) == 0;
+}
+
+static void CCTX_guardSuccessorInputs(
+        ZL_CCtx* cctx,
+        const RTStreamID* rtInputs,
+        size_t nbInputs,
+        unsigned depth)
+{
+    for (size_t n = 0; n < nbInputs; n++) {
+        RTGM_guardRTStream(&cctx->rtgraph, rtInputs[n], depth);
+    }
+}
+
+static void CCTX_clearSuccessorInputs(
+        ZL_CCtx* cctx,
+        const RTStreamID* rtInputs,
+        size_t nbInputs,
+        unsigned depth)
+{
+    for (size_t n = 0; n < nbInputs; n++) {
+        RTGM_clearRTStream(&cctx->rtgraph, rtInputs[n], depth);
+    }
+}
+
 /* Invoked from: CCTX_startGraph(), CCTX_runSuccessors()
  * Upper echelon, acts as a graph type dispatcher,
  * routing between segmenter and normal graphs.
@@ -1398,12 +1488,7 @@ ZL_Report CCTX_runSuccessor(
                depth);
     }
     ZL_DLOG(BLOCK, "CCTX_runSuccessor (graphid=%u)", graphid.gid);
-    // A segmenter is allowed if it is not run inside a segmenter, and not run
-    // after nodes are executed.
-    int const isSegmentable =
-            (rtInputs[0].rtsid == 0 && nbInputs == cctx->nbInputs
-             && cctx->numSegments == 0 && cctx->segmenterDepth == 0
-             && RTGM_getNbNodes(&cctx->rtgraph) == 0);
+    int const isSegmentable = CCTX_isSegmentable(cctx, rtInputs, nbInputs);
 
     // Segmenter
     if (CGRAPH_graphType(cctx->cgraph, graphid) == gt_segmenter) {
@@ -1415,17 +1500,452 @@ ZL_Report CCTX_runSuccessor(
     }
 
     // Normal Graph
-    for (size_t n = 0; n < nbInputs; n++) {
-        RTGM_guardRTStream(&cctx->rtgraph, rtInputs[n], depth);
-    }
+    CCTX_guardSuccessorInputs(cctx, rtInputs, nbInputs, depth);
     ZL_Report const r = CCTX_runSuccessor_internal(
             cctx, graphid, rgp, rtInputs, nbInputs, depth);
     if (!isSegmentable) {
-        for (size_t n = 0; n < nbInputs; n++) {
-            RTGM_clearRTStream(&cctx->rtgraph, rtInputs[n], depth);
-        }
+        CCTX_clearSuccessorInputs(cctx, rtInputs, nbInputs, depth);
     }
     return r;
+}
+
+/* ==========================================================
+ * Parallel execution of successors
+ * ==========================================================
+ * Successors of a Graph are independent: each one only consumes its own
+ * inputs. When serially executed (depth-first), each successor subtree
+ * creates a contiguous range of RTNodes and RTStreams, in successor order.
+ *
+ * CCTX_runSuccessorsMT() compresses some successor subtrees in worker
+ * contexts (child CCtx), possibly on background threads. Their runtime graph
+ * is then spliced into the parent runtime graph, in successor order, with
+ * remapped IDs (see RTGM_appendSubgraph()). The resulting frame is therefore
+ * identical to serial compression, whatever the number of threads.
+ *
+ * Rules:
+ * - Only the calling thread fans out. Worker contexts run serially.
+ * - Workers never access the parent context: everything they need is
+ *   prepared by the calling thread at submission time. They only read the
+ *   content of their input streams, which the parent doesn't modify nor
+ *   release until the successor is spliced.
+ * - If a worker fails, or its result can't be spliced (e.g. frame limits),
+ *   the successor is executed again, serially, in the parent context.
+ *   Errors and warnings are therefore those of serial compression.
+ */
+
+typedef struct {
+    ZL_PoolJob job;
+    ZL_CCtx* child;
+    ZL_GraphID graphID;
+    const ZL_RuntimeGraphParameters* rgp;
+    const RTStreamID* childInputs;
+    size_t nbInputs;
+    unsigned depth;
+    ZL_Report result;
+    int offload;
+    int submitted;
+} CCTX_SubtreeTask;
+
+static ZL_CCtx* CCTX_acquireChild(ZL_CCtx* cctx)
+{
+    size_t const nbIdle = VECTOR_SIZE(cctx->idleChildren);
+    if (nbIdle > 0) {
+        ZL_CCtx* const child = VECTOR_AT(cctx->idleChildren, nbIdle - 1);
+        VECTOR_POPBACK(cctx->idleChildren);
+        return child;
+    }
+    ZL_CCtx* const child = CCTX_create();
+    if (child == NULL) {
+        return NULL;
+    }
+    child->isWorkerChild = true;
+    if (cctx->dataArenaType != ZL_DataArenaType_heap
+        && ZL_isError(ZL_CCtx_setDataArena(child, cctx->dataArenaType))) {
+        CCTX_free(child);
+        return NULL;
+    }
+    return child;
+}
+
+static void CCTX_releaseChild(ZL_CCtx* cctx, ZL_CCtx* child)
+{
+    CCTX_clean(child);
+    ZL_OC_clearErrors(&child->opCtx);
+    if (!VECTOR_PUSHBACK(cctx->idleChildren, child)) {
+        CCTX_free(child);
+    }
+}
+
+/* Runs on a worker thread, or on the calling thread */
+static void CCTX_runSubtreeJob(void* opaque)
+{
+    CCTX_SubtreeTask* const task = (CCTX_SubtreeTask*)opaque;
+    task->result                 = CCTX_runSuccessor(
+            task->child,
+            task->graphID,
+            task->rgp,
+            task->childInputs,
+            task->nbInputs,
+            task->depth);
+}
+
+/* Prepares a child context to run successor @si.
+ * Invoked by the calling thread. */
+static ZL_Report CCTX_prepareSubtree(
+        ZL_CCtx* cctx,
+        CCTX_SubtreeTask* task,
+        const SuccessorInfo* si,
+        unsigned depth)
+{
+    // Errors here only disable the offload: don't report them in @cctx
+    ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
+    ZL_CCtx* const child = CCTX_acquireChild(cctx);
+    ZL_ERR_IF_NULL(child, allocation);
+
+    ZL_OC_startOperation(&child->opCtx, ZL_Operation_compress);
+    child->cgraph = cctx->cgraph;
+    // requested parameters are used by nested tryGraph contexts
+    GCParams_copy(&child->requestedGCParams, &cctx->requestedGCParams);
+    GCParams_copy(&child->appliedGCParams, &cctx->appliedGCParams);
+    child->attachedCodecOutputCache         = NULL;
+    child->tryGraphCodecOutputCacheMaxBytes = cctx->tryGraphCodecOutputCacheMaxBytes;
+    CCTX_setTryGraphCacheStatsEnabled(
+            child, cctx->tryGraphCodecOutputCacheStatsEnabled);
+    child->tryGraphCodecOutputCacheActive = false;
+    child->inputs                         = NULL;
+    child->nbInputs                       = cctx->nbInputs;
+    child->numSegments                    = cctx->numSegments;
+    child->segmenterDepth                 = cctx->segmenterDepth;
+    child->inBackupMode                   = 0;
+
+    RTStreamID* const childInputs = ALLOC_Arena_malloc(
+            child->sessionArena, si->nbInputs * sizeof(RTStreamID));
+    ZL_Report report = ZL_returnSuccess();
+    if (childInputs == NULL) {
+        report = ZL_REPORT_ERROR(allocation);
+    }
+    for (size_t n = 0; n < si->nbInputs && !ZL_isError(report); n++) {
+        RTStreamID const prtsid = si->rtInputs[n];
+        ZL_RESULT_OF(RTStreamID)
+        const crtsid = RTGM_refInput(
+                &child->rtgraph, RTGM_getRStream(&cctx->rtgraph, prtsid));
+        if (ZL_RES_isError(crtsid)) {
+            report = ZL_REPORT_ERROR(allocation);
+            break;
+        }
+        ZL_ASSERT_EQ(ZL_RES_value(crtsid).rtsid, n);
+        // Mirror the attributes the stream has in @cctx at this point,
+        // i.e. before CCTX_runSuccessor() guards it.
+        RTGM_setStreamAttributes(
+                &child->rtgraph,
+                ZL_RES_value(crtsid),
+                RTGM_getOutcomeID_fromRtstream(&cctx->rtgraph, prtsid),
+                RTGM_getProtectRank(&cctx->rtgraph, prtsid));
+        childInputs[n] = ZL_RES_value(crtsid);
+    }
+    if (ZL_isError(report)) {
+        CCTX_releaseChild(cctx, child);
+        return report;
+    }
+
+    task->job         = (ZL_PoolJob){ .fn = CCTX_runSubtreeJob, .opaque = task };
+    task->child       = child;
+    task->graphID     = si->graphID;
+    task->rgp         = si->rgp;
+    task->childInputs = childInputs;
+    task->nbInputs    = si->nbInputs;
+    task->depth       = depth;
+    task->result      = ZL_returnSuccess();
+    return ZL_returnSuccess();
+}
+
+/* Appends the runtime graph and transform headers of @child into @cctx.
+ * On failure, @cctx is restored to its previous state. */
+static ZL_Report CCTX_spliceSubtree(
+        ZL_CCtx* cctx,
+        const ZL_CCtx* child,
+        const RTStreamID* rtInputs,
+        size_t nbInputs)
+{
+    // Errors here only trigger a serial execution: don't report them in @cctx
+    ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
+    size_t const nbNodesBefore   = RTGM_getNbNodes(&cctx->rtgraph);
+    size_t const nbStreamsBefore = RTGM_getNbStreams(&cctx->rtgraph);
+    VECTOR(uint8_t)* const staging = &cctx->trHeaders.stagingHeaderStream;
+    size_t const headerOffset      = VECTOR_SIZE(*staging);
+
+    // Note: the child's staging buffer may contain headers of reverted nodes.
+    // They are copied too, just like in serial mode, so that the header size
+    // limit is reached at the same time.
+    ZL_Report r = appendToVector(
+            staging,
+            ZL_RBuffer_fromVector(&child->trHeaders.stagingHeaderStream));
+    if (!ZL_isError(r)) {
+        r = RTGM_appendSubgraph(
+                &cctx->rtgraph,
+                &child->rtgraph,
+                rtInputs,
+                nbInputs,
+                headerOffset);
+        if (ZL_isError(r)) {
+            RTGM_clearNodesFrom(&cctx->rtgraph, (unsigned)nbNodesBefore);
+            RTGM_clearRTStreamsFrom(&cctx->rtgraph, (unsigned)nbStreamsBefore);
+        }
+        size_t const restored = VECTOR_RESIZE(
+                *staging, ZL_isError(r) ? headerOffset : VECTOR_SIZE(*staging));
+        (void)restored;
+    }
+    ZL_ERR_IF_ERR(r);
+    return ZL_returnSuccess();
+}
+
+/* Completes successor @si, whose subtree was compressed in @task->child.
+ * Invoked by the calling thread, in successor order. */
+static ZL_Report CCTX_finishSubtree(
+        ZL_CCtx* cctx,
+        CCTX_SubtreeTask* task,
+        const SuccessorInfo* si,
+        unsigned depth)
+{
+    ZL_CCtx* const child = task->child;
+    task->child          = NULL;
+    ZL_ASSERT(!CCTX_isSegmentable(cctx, si->rtInputs, si->nbInputs));
+    if (!ZL_isError(task->result)) {
+        // Replay CCTX_runSuccessor() around the spliced subtree
+        unsigned* const protectRanks =
+                ZL_malloc(si->nbInputs * sizeof(protectRanks[0]));
+        if (protectRanks != NULL) {
+            for (size_t n = 0; n < si->nbInputs; n++) {
+                protectRanks[n] = RTGM_getProtectRank(
+                        &cctx->rtgraph, si->rtInputs[n]);
+            }
+            CCTX_guardSuccessorInputs(cctx, si->rtInputs, si->nbInputs, depth);
+            ZL_Report const spliced = CCTX_spliceSubtree(
+                    cctx, child, si->rtInputs, si->nbInputs);
+            if (!ZL_isError(spliced)) {
+                ZL_free(protectRanks);
+                CCTX_clearSuccessorInputs(
+                        cctx, si->rtInputs, si->nbInputs, depth);
+                ZL_OC_adoptErrorsAndWarnings(&cctx->opCtx, &child->opCtx);
+                CCTX_releaseChild(cctx, child);
+                cctx->mtStats.nbSpliced++;
+                return ZL_returnSuccess();
+            }
+            // Undo the guard
+            for (size_t n = 0; n < si->nbInputs; n++) {
+                RTGM_setStreamAttributes(
+                        &cctx->rtgraph,
+                        si->rtInputs[n],
+                        RTGM_getOutcomeID_fromRtstream(
+                                &cctx->rtgraph, si->rtInputs[n]),
+                        protectRanks[n]);
+            }
+            ZL_free(protectRanks);
+        }
+    }
+    // Fallback: serial execution, in the exact same conditions as serial mode
+    ZL_DLOG(BLOCK,
+            "CCTX_finishSubtree: offloaded successor failed, running it again "
+            "serially");
+    CCTX_releaseChild(cctx, child);
+    cctx->mtStats.nbFallbacks++;
+    return CCTX_runSuccessor(
+            cctx, si->graphID, si->rgp, si->rtInputs, si->nbInputs, depth);
+}
+
+static size_t CCTX_successorInputSize(
+        const ZL_CCtx* cctx,
+        const SuccessorInfo* si)
+{
+    size_t total = 0;
+    for (size_t n = 0; n < si->nbInputs; n++) {
+        const ZL_Data* const data =
+                RTGM_getRStream(&cctx->rtgraph, si->rtInputs[n]);
+        total += ZL_Data_contentSize(data);
+        if (ZL_Data_type(data) == ZL_Type_string) {
+            total += ZL_Data_numElts(data) * sizeof(uint32_t);
+        }
+    }
+    return total;
+}
+
+/* Decides which successors are offloaded into @tasks[n].offload.
+ * @returns the number of offloaded successors. */
+static size_t CCTX_selectOffloadedSuccessors(
+        const ZL_CCtx* cctx,
+        const SuccessorInfo* successorArray,
+        size_t nbSuccessors,
+        CCTX_SubtreeTask* tasks)
+{
+    int const force = (cctx->mtTestingFlags & CCTX_MT_FORCE_OFFLOAD) != 0;
+    size_t const minTaskSize = cctx->appliedGCParams.mtMinTaskSize > 0
+            ? (size_t)cctx->appliedGCParams.mtMinTaskSize
+            : ZL_MTMINTASKSIZE_DEFAULT;
+    size_t totalSize = 0;
+    for (size_t n = 0; n < nbSuccessors; n++) {
+        const SuccessorInfo* const si = successorArray + n;
+        if (!CGRAPH_checkGraphIDExists(cctx->cgraph, si->graphID)) {
+            return 0;
+        }
+        if (CGRAPH_graphType(cctx->cgraph, si->graphID) == gt_segmenter) {
+            return 0;
+        }
+        totalSize += CCTX_successorInputSize(cctx, si);
+    }
+    size_t nbOffloaded = 0;
+    for (size_t n = 0; n < nbSuccessors; n++) {
+        const SuccessorInfo* const si = successorArray + n;
+        size_t const size             = CCTX_successorInputSize(cctx, si);
+        int offload = CGRAPH_graphType(cctx->cgraph, si->graphID) == gt_miGraph
+                // Successors of session inputs may be segmentable
+                && si->rtInputs[0].rtsid != 0;
+        if (offload && !force) {
+            offload = size >= minTaskSize
+                    // A dominant successor is run by the calling thread,
+                    // so that it can itself fan out its own successors
+                    && size <= totalSize / 2;
+        }
+        tasks[n].offload = offload;
+        nbOffloaded += (size_t)offload;
+    }
+    return nbOffloaded;
+}
+
+static int CCTX_mtEligible(const ZL_CCtx* cctx, size_t nbSuccessors)
+{
+    if (nbSuccessors < 2 || cctx->appliedGCParams.nbWorkers <= 1) {
+        return 0;
+    }
+    if (!ZL_MULTITHREAD && !(cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS)) {
+        return 0;
+    }
+    if (cctx->isWorkerChild || cctx->fanOutDisabled || cctx->inBackupMode) {
+        return 0;
+    }
+    // Introspection hooks observe the serial execution order
+    if (cctx->opCtx.hasCompressionHooks) {
+        return 0;
+    }
+    // A codec output cache is shared mutable state.
+    // Moreover, when a cache is active, the successors were likely already
+    // compressed by tryGraph(), and can be replayed from the cache.
+    if (CCTX_getCodecOutputCache(cctx) != NULL) {
+        return 0;
+    }
+    return 1;
+}
+
+static ZL_Report CCTX_ensureThreadPool(ZL_CCtx* cctx, unsigned nbThreads)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
+    if (ZL_ThreadPool_nbThreads(cctx->pool) != nbThreads) {
+        // Only possible between compressions: nbWorkers is fixed during one
+        ZL_ThreadPool_free(cctx->pool);
+        cctx->pool = ZL_ThreadPool_create(nbThreads);
+        ZL_ERR_IF_NULL(cctx->pool, allocation);
+    }
+    return ZL_returnSuccess();
+}
+
+/* @returns 1 if successors were run, in which case their outcome is written
+ * into @result, or 0 if they must be run serially. */
+static int CCTX_runSuccessorsMT(
+        ZL_CCtx* cctx,
+        const SuccessorInfo* successorArray,
+        size_t nbSuccessors,
+        unsigned depth,
+        ZL_Report* result)
+{
+    if (!CCTX_mtEligible(cctx, nbSuccessors)) {
+        return 0;
+    }
+    int const synchronous = (cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS) != 0;
+    unsigned const nbWorkers = (unsigned)cctx->appliedGCParams.nbWorkers;
+    CCTX_SubtreeTask* const tasks =
+            ZL_calloc(nbSuccessors * sizeof(CCTX_SubtreeTask));
+    if (tasks == NULL) {
+        return 0;
+    }
+    if (CCTX_selectOffloadedSuccessors(
+                cctx, successorArray, nbSuccessors, tasks)
+                == 0
+        || (!synchronous
+            && ZL_isError(CCTX_ensureThreadPool(cctx, nbWorkers - 1)))) {
+        ZL_free(tasks);
+        return 0;
+    }
+    ZL_DLOG(BLOCK,
+            "CCTX_runSuccessorsMT on %zu successors (depth=%u)",
+            nbSuccessors,
+            depth);
+
+    // Bound the number of subtrees held in memory at the same time
+    size_t const window = synchronous ? 1 : 2 * (size_t)nbWorkers;
+    size_t nextSubmit   = 0;
+    size_t nbInFlight   = 0;
+    ZL_Report r         = ZL_returnSuccess();
+    size_t n            = 0;
+    for (; n < nbSuccessors; n++) {
+        while (nextSubmit < nbSuccessors && nbInFlight < window) {
+            CCTX_SubtreeTask* const task = tasks + nextSubmit;
+            if (task->offload) {
+                if (ZL_isError(CCTX_prepareSubtree(
+                            cctx,
+                            task,
+                            successorArray + nextSubmit,
+                            depth + 1))) {
+                    task->offload = 0; // run it serially instead
+                } else {
+                    if (!synchronous) {
+                        ZL_ThreadPool_submit(cctx->pool, &task->job);
+                    }
+                    task->submitted = 1;
+                    nbInFlight++;
+                }
+            }
+            nextSubmit++;
+        }
+        ZL_ASSERT_LT(n, nextSubmit);
+
+        const SuccessorInfo* const si = successorArray + n;
+        CCTX_SubtreeTask* const task  = tasks + n;
+        if (task->submitted) {
+            if (synchronous) {
+                CCTX_runSubtreeJob(task);
+            } else {
+                ZL_ThreadPool_waitOrRun(cctx->pool, &task->job);
+            }
+            task->submitted = 0;
+            nbInFlight--;
+            r = CCTX_finishSubtree(cctx, task, si, depth + 1);
+        } else {
+            r = CCTX_runSuccessor(
+                    cctx,
+                    si->graphID,
+                    si->rgp,
+                    si->rtInputs,
+                    si->nbInputs,
+                    depth + 1);
+        }
+        if (ZL_isError(r)) {
+            break;
+        }
+    }
+
+    // On error, discard the subtrees still in flight
+    for (size_t k = n; k < nextSubmit; k++) {
+        CCTX_SubtreeTask* const task = tasks + k;
+        if (!task->submitted) {
+            continue;
+        }
+        if (!synchronous && !ZL_ThreadPool_cancel(cctx->pool, &task->job)) {
+            ZL_ThreadPool_waitOrRun(cctx->pool, &task->job);
+        }
+        CCTX_releaseChild(cctx, task->child);
+    }
+    ZL_free(tasks);
+    *result = r;
+    return 1;
 }
 
 /* Expectation :
@@ -1469,6 +1989,8 @@ CCTX_startCompression(ZL_CCtx* cctx, const ZL_Data* inputs[], size_t nbInputs)
     ZL_ASSERT_EQ(ALLOC_Arena_memUsed(cctx->rtgraph.streamArena), 0);
     ZL_ASSERT_EQ(VECTOR_SIZE(cctx->trHeaders.stagingHeaderStream), 0);
     ZL_ASSERT_EQ(VECTOR_SIZE(cctx->trHeaders.sentHeaderStream), 0);
+
+    cctx->mtStats = (CCTX_MTStats){ 0 };
 
     // Map inputs
     cctx->inputs = ZL_codemodDatasAsInputs(inputs);
@@ -2118,6 +2640,8 @@ ZL_CCtx* CCTX_createDerivedCCtx(const ZL_CCtx* originalCCtx)
             originalCCtx->tryGraphCodecOutputCacheMaxBytes;
     cctx->tryGraphCodecOutputCacheStatsEnabled =
             originalCCtx->tryGraphCodecOutputCacheStatsEnabled;
+    // tryGraph contexts may run on worker threads
+    cctx->fanOutDisabled = true;
     return cctx;
 }
 
@@ -2210,7 +2734,11 @@ size_t CCTX_sizeof(const ZL_CCtx* cctx)
     if (cctx == NULL) {
         return 0;
     }
-    return sizeof(*cctx) + RTGM_sizeof(&cctx->rtgraph)
+    size_t childrenSize = VECTOR_SIZEOF(cctx->idleChildren);
+    for (size_t n = 0; n < VECTOR_SIZE(cctx->idleChildren); n++) {
+        childrenSize += CCTX_sizeof(VECTOR_AT(cctx->idleChildren, n));
+    }
+    return sizeof(*cctx) + childrenSize + RTGM_sizeof(&cctx->rtgraph)
             + ZL_Compressor_sizeof(cctx->internal_cgraph)
             + TRS_sizeof(&cctx->cachedCodecStates)
             + CCTX_TransformHeaders_sizeof(&cctx->trHeaders)
