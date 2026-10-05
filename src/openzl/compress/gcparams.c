@@ -59,7 +59,7 @@ const GCParamToName GCParams_kAllParams[] = {
       { (const char*[]){ "storeOnExpansion" }, 1 } },
     { ZL_CParam_minStreamSize, { (const char*[]){ "minStreamSize" }, 1 } },
     { ZL_CParam_serialBackendSearch,
-      { (const char*[]){ "serialBackendSearch" }, 1 } }
+      { (const char*[]){ "serialBackendSearch" }, 1 } },
     { ZL_CParam_nbWorkers, { (const char*[]){ "nbWorkers" }, 1 } },
     { ZL_CParam_mtMinTaskSize, { (const char*[]){ "mtMinTaskSize" }, 1 } }
 };
