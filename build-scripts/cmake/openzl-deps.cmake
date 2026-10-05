@@ -188,6 +188,22 @@ list(APPEND OPENZL_LINK_LIBRARIES lz4)
 list(APPEND OPENZL_INCLUDE_DIRECTORIES
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/lz4/lib>")
 
+# zlib, liblzma and libbzip3 are taken from the system. They back the deflate,
+# lzma2 and bzip3 codecs. Link them by name so the exported targets stay
+# relocatable.
+foreach(_openzl_syslib IN ITEMS "z;zlib.h" "lzma;lzma.h" "bzip3;libbz3.h")
+    list(GET _openzl_syslib 0 _openzl_syslib_name)
+    list(GET _openzl_syslib 1 _openzl_syslib_header)
+    find_path(OPENZL_${_openzl_syslib_name}_INCLUDE_DIR ${_openzl_syslib_header})
+    find_library(OPENZL_${_openzl_syslib_name}_LIBRARY ${_openzl_syslib_name})
+    if(NOT OPENZL_${_openzl_syslib_name}_INCLUDE_DIR OR NOT OPENZL_${_openzl_syslib_name}_LIBRARY)
+        message(FATAL_ERROR "Missing system library lib${_openzl_syslib_name} (${_openzl_syslib_header}): install its development package")
+    endif()
+    list(APPEND OPENZL_INCLUDE_DIRECTORIES
+        "$<BUILD_INTERFACE:${OPENZL_${_openzl_syslib_name}_INCLUDE_DIR}>")
+    list(APPEND OPENZL_LINK_LIBRARIES ${_openzl_syslib_name})
+endforeach()
+
 find_library(MATH_LIBRARY m)
 if(MATH_LIBRARY)
     list(APPEND OPENZL_LINK_LIBRARIES m)

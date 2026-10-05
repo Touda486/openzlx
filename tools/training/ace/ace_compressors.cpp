@@ -8,9 +8,21 @@
 
 #include "openzl/cpp/codecs/Bitsplit.hpp"
 
+#include <atomic>
+#include <stdexcept>
+
 namespace openzl {
 namespace training {
 namespace {
+std::atomic<bool> gIncludeExtraBackends{ false };
+std::atomic<bool> gUniverseBuilt{ false };
+
+bool useExtraBackends()
+{
+    gUniverseBuilt = true;
+    return gIncludeExtraBackends;
+}
+
 template <typename NodeT>
 ACENode buildNode(const NodeT& node)
 {
@@ -82,6 +94,15 @@ std::vector<ACEGraph> makeAllGraphs()
     }
     for (int level = -5; level < 10; ++level) {
         g.push_back(buildGraph(graphs::Zstd{ level }));
+    }
+    if (useExtraBackends()) {
+        // Only a few levels: these backends are slow, and each extra graph
+        // dilutes the search.
+        for (int level : { 1, 6, 9 }) {
+            g.push_back(buildGraph(graphs::Deflate{ level }));
+            g.push_back(buildGraph(graphs::Lzma2{ level }));
+        }
+        g.push_back(buildGraph(graphs::Bzip3{}));
     }
     g.push_back(buildGraph(graphs::Flatpack{}));
     g.push_back(buildGraph(graphs::Store{}));
@@ -155,6 +176,14 @@ std::vector<ACECompressor> makePrebuiltNumericCompressors()
         quantizeOffsets,
         quantizeLengths,
     };
+    if (useExtraBackends()) {
+        ACECompressor lzma2(buildGraph(graphs::Lzma2{}));
+        ACECompressor bzip3(buildGraph(graphs::Bzip3{}));
+        prebuilt.push_back(
+                ACECompressor(buildNode(nodes::TransposeSplit{}), { lzma2 }));
+        prebuilt.push_back(
+                ACECompressor(buildNode(nodes::TransposeSplit{}), { bzip3 }));
+    }
     compressors.insert(compressors.end(), prebuilt.begin(), prebuilt.end());
     return compressors;
 }
@@ -174,6 +203,18 @@ std::vector<ACECompressor> makePrebuiltStructCompressors()
     compressors.push_back(zstd);
     compressors.push_back(transpose);
     compressors.push_back(tokenizeFieldLz);
+    if (useExtraBackends()) {
+        for (const ACECompressor& backend :
+             { ACECompressor(buildGraph(graphs::Lzma2{})),
+               ACECompressor(buildGraph(graphs::Bzip3{})) }) {
+            ACECompressor backendTranspose(
+                    buildNode(nodes::TransposeSplit{}), { backend });
+            compressors.push_back(backendTranspose);
+            compressors.push_back(ACECompressor(
+                    buildNode(nodes::TokenizeStruct{}),
+                    { backendTranspose, fieldLz }));
+        }
+    }
 
     for (const auto& compressor : makePrebuiltNumericCompressors()) {
         compressors.push_back(ACECompressor(
@@ -236,6 +277,19 @@ std::vector<ACECompressor> makePrebuiltStringCompressors()
     compressors.push_back(prefix);
     compressors.push_back(tokenizeSorted);
     compressors.push_back(tokenize);
+    if (useExtraBackends()) {
+        for (const ACECompressor& backend :
+             { ACECompressor(buildGraph(graphs::Lzma2{})),
+               ACECompressor(buildGraph(graphs::Bzip3{})) }) {
+            ACECompressor backendSeparate(
+                    buildNode(nodes::SeparateStringComponents{}),
+                    { backend, fieldLz });
+            compressors.push_back(backendSeparate);
+            compressors.push_back(ACECompressor(
+                    buildNode(nodes::TokenizeString{ false }),
+                    { backendSeparate, fieldLz }));
+        }
+    }
 
     return compressors;
 }
@@ -257,6 +311,20 @@ std::vector<ACECompressor> makePrebuiltCompressors(Type inputType)
     }
 }
 } // namespace
+
+void setIncludeExtraBackends(bool includeExtraBackends)
+{
+    if (gUniverseBuilt && gIncludeExtraBackends != includeExtraBackends) {
+        throw std::logic_error(
+                "ACE extra backends must be configured before ACE is used");
+    }
+    gIncludeExtraBackends = includeExtraBackends;
+}
+
+bool includeExtraBackends()
+{
+    return gIncludeExtraBackends;
+}
 
 poly::span<const ACENode> getAllNodes()
 {

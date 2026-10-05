@@ -62,6 +62,88 @@ TEST_F(TestCodecs, lz4_hc)
     auto compressed = testRoundTrip(compressor_, Input::refSerial(data));
 }
 
+TEST_F(TestCodecs, deflate)
+{
+    std::string data(10000, 'a');
+    for (auto level : { 1, 9 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.selectStartingGraph(
+                graphs::Deflate(level).parameterize(compressor));
+        testRoundTrip(compressor, Input::refSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, lzma2)
+{
+    std::string data(10000, 'a');
+    for (auto level : { 0, 9 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.selectStartingGraph(
+                graphs::Lzma2(level).parameterize(compressor));
+        testRoundTrip(compressor, Input::refSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, bzip3)
+{
+    // 2 * 65 KiB: a multiple of the block size, which libbzip3 mishandles
+    std::string data(2 * (65 << 10), 'a');
+    for (auto blockSize : { 65 << 10, 1 << 20 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.selectStartingGraph(
+                graphs::Bzip3(blockSize).parameterize(compressor));
+        testRoundTrip(compressor, Input::refSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, newBackendsRejectedBeforeFormatVersion28)
+{
+    std::string data(10000, 'a');
+    for (auto graph : { ZL_GRAPH_DEFLATE, ZL_GRAPH_LZMA2, ZL_GRAPH_BZIP3 }) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, 27);
+        compressor.selectStartingGraph(graph);
+        CCtx cctx;
+        cctx.refCompressor(compressor);
+        EXPECT_ANY_THROW(cctx.compressSerial(data));
+    }
+}
+
+TEST_F(TestCodecs, serialBackendSearch)
+{
+    // Text-like data, on which lzma2 & bzip3 beat zstd
+    std::string data;
+    for (int i = 0; i < 20000; ++i) {
+        data += "line " + std::to_string((i * 7919) % 1013) + " of the test\n";
+    }
+    auto compressedSize = [&](int search, int formatVersion) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, formatVersion);
+        compressor.setParameter(CParam::SerialBackendSearch, search);
+        compressor.selectStartingGraph(ZL_GRAPH_COMPRESS_GENERIC);
+        return testRoundTrip(compressor, Input::refSerial(data)).size();
+    };
+    const size_t zstdOnly = compressedSize(0, ZL_MAX_FORMAT_VERSION);
+    size_t all            = zstdOnly;
+    for (int search = 1; search <= ZL_SerialBackendSearch_all; ++search) {
+        const size_t size = compressedSize(search, ZL_MAX_FORMAT_VERSION);
+        EXPECT_LE(size, zstdOnly) << "search=" << search;
+        if (search == ZL_SerialBackendSearch_all) {
+            all = size;
+        }
+    }
+    EXPECT_LT(all, zstdOnly);
+    // Older format versions can't use the new backends, and fall back to zstd
+    EXPECT_EQ(compressedSize(ZL_SerialBackendSearch_all, 27), compressedSize(0, 27));
+    // Invalid values are rejected
+    Compressor compressor;
+    EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, 8));
+    EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, -1));
+}
+
 TEST_F(TestCodecs, lzParameters)
 {
     const auto muxLengthsGraph =

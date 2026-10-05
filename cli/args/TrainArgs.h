@@ -44,6 +44,13 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
                 "Output file path for the trained compressor.");
         parser.addCommandFlag(
                 cmd(), kForce, 'f', false, "Overwrite output file.");
+        parser.addCommandFlag(
+                cmd(),
+                kLevel,
+                'l',
+                true,
+                "Compression level of the compressor to train (default: 6). "
+                "Some profiles build a different graph depending on it.");
 
         // Train Params
         parser.addCommandFlag(
@@ -78,6 +85,12 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
                 0,
                 false,
                 "Disable ACE successors during training.");
+        parser.addCommandFlag(
+                cmd(),
+                kAceExtraBackends,
+                0,
+                false,
+                "Experimental: let ACE also pick the deflate, lzma2 and bzip3 backends. Slower training and compression.");
         parser.addCommandFlag(
                 cmd(),
                 kNoClustering,
@@ -145,6 +158,11 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
     explicit TrainArgs(const arg::ParsedArgs& parsed)
             : GlobalArgs(parsed), ProfileArgs(parsed)
     {
+        auto levelArg = parsed.cmdFlag(cmd(), kLevel);
+        if (levelArg) {
+            setRequestedCompressionLevel(
+                    util::checkedstoiExact(levelArg.value()));
+        }
         // Create the compressor
         setCompressor(createCompressorFromArgs(
                 *this, parsed.cmdFlag(cmd(), kCompressor)));
@@ -239,6 +257,8 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
 
         trainParams.noAceSuccessors =
                 parsed.cmdHasFlag(cmd(), kNoAceSuccessors);
+        trainParams.aceExtraBackends =
+                parsed.cmdHasFlag(cmd(), kAceExtraBackends);
 
         trainParams.noClustering = parsed.cmdHasFlag(cmd(), kNoClustering);
         trainParams.saveAceState = parsed.cmdHasFlag(cmd(), kSaveAceState);
@@ -297,11 +317,13 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
     inline static const std::string kDictBundleOutput = "dict-bundle-output";
 
     // Train Params
+    inline static const std::string kLevel            = "level";
     inline static const std::string kTrainer          = "trainer";
     inline static const std::string kThreads          = "threads";
     inline static const std::string kNumSamples       = "num-samples";
     inline static const std::string kUseAllSamples    = "use-all-samples";
     inline static const std::string kNoAceSuccessors  = "no-ace-successors";
+    inline static const std::string kAceExtraBackends = "ace-extra-backends";
     inline static const std::string kNoClustering     = "no-clustering";
     inline static const std::string kMaxTimeSecs      = "max-time-secs";
     inline static const std::string kMaxFileSizeMb    = "max-file-size-mb";

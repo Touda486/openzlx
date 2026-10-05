@@ -15,5 +15,6 @@ enum class CParam {
     ContentChecksum       = ZL_CParam_contentChecksum,
     StoreOnExpansion      = ZL_CParam_storeOnExpansion,
     MinStreamSize         = ZL_CParam_minStreamSize,
+    SerialBackendSearch   = ZL_CParam_serialBackendSearch,
 };
 }

@@ -74,6 +74,11 @@ typedef struct {
     /// Set to negative value to completely disable auto-store feature
     unsigned minStreamSize;
 
+    /// Experimental: bitmask of extra serial backends that
+    /// ZL_GRAPH_COMPRESS_GENERIC tries next to zstd (ZL_SerialBackendSearch_*)
+    /// 0 (default): serial streams always go to zstd
+    unsigned serialBackendSearch;
+
     /// Preserve parameters across compression sessions (CCtx level only)
     /// 0 (default): Reset parameters after each session
     /// 1: Keep parameters sticky across sessions

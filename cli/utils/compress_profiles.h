@@ -33,6 +33,11 @@ class ProfileArgs {
         return chunkSize_;
     }
 
+    const poly::optional<int>& serialBackendSearch() const
+    {
+        return serialBackendSearch_;
+    }
+
     const poly::optional<int>& requestedCompressionLevel() const
     {
         return requestedCompressionLevel_;
@@ -82,9 +87,12 @@ class ProfileArgs {
     inline static const std::string kProfileArg = "profile-arg";
     inline static const std::string kChunkSize  = "chunk-size";
     inline static const std::string kProfile    = "profile";
+    inline static const std::string kSerialBackendSearch =
+            "serial-backend-search";
 
     poly::optional<std::string> name_;
     poly::optional<size_t> chunkSize_;
+    poly::optional<int> serialBackendSearch_;
     poly::optional<int> requestedCompressionLevel_;
     int verbosityLevel_{ 3 };
     // Arbitrary (K,V) arguments provided on the command line.

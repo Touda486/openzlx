@@ -171,6 +171,14 @@ typedef enum {
     /// @default 0 currently means enabled, preserving existing behavior.
     ZL_CParam_storeOnExpansion = 12,
 
+    /// Experimental: lets ZL_GRAPH_COMPRESS_GENERIC pick the backend of serial
+    /// streams among several general purpose codecs, by actually trying each
+    /// of them and keeping the smallest result. This is slow.
+    /// Valid values are bitmasks of ZL_SerialBackendSearch_*.
+    /// zstd is always a candidate.
+    /// @default 0 means no search: serial streams are always sent to zstd.
+    ZL_CParam_serialBackendSearch = 13,
+
     // Other possible parameters (ideas) :
     //  - Backup when a node errors out (continue with generic LZ, or error
     //  out)
@@ -185,6 +193,12 @@ typedef enum {
 #define ZL_COMPRESSIONLEVEL_DEFAULT 6
 #define ZL_DECOMPRESSIONLEVEL_DEFAULT 3
 #define ZL_MINSTREAMSIZE_DEFAULT 10
+
+/// Candidates for ZL_CParam_serialBackendSearch
+#define ZL_SerialBackendSearch_deflate 1
+#define ZL_SerialBackendSearch_lzma2 2
+#define ZL_SerialBackendSearch_bzip3 4
+#define ZL_SerialBackendSearch_all 7
 
 /**
  * @brief Sets a global compression parameter via the CCtx.

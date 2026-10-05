@@ -27,6 +27,7 @@ const GCParams GCParams_default = {
     .contentChecksum    = ZL_TernaryParam_enable,
     .storeOnExpansion   = ZL_TernaryParam_enable,
     .minStreamSize      = ZL_MINSTREAMSIZE_DEFAULT,
+    .serialBackendSearch = 0,
 };
 
 typedef struct {
@@ -56,7 +57,9 @@ const GCParamToName GCParams_kAllParams[] = {
     { ZL_CParam_contentChecksum, { (const char*[]){ "contentChecksum" }, 1 } },
     { ZL_CParam_storeOnExpansion,
       { (const char*[]){ "storeOnExpansion" }, 1 } },
-    { ZL_CParam_minStreamSize, { (const char*[]){ "minStreamSize" }, 1 } }
+    { ZL_CParam_minStreamSize, { (const char*[]){ "minStreamSize" }, 1 } },
+    { ZL_CParam_serialBackendSearch,
+      { (const char*[]){ "serialBackendSearch" }, 1 } }
 };
 
 static ZL_Report setTernaryParam(ZL_TernaryParam* param, int value)
@@ -110,6 +113,11 @@ GCParams_setParameter(GCParams* gcparams, ZL_CParam paramId, int value)
             // TODO (@Cyan): provide bounds
             gcparams->minStreamSize = (unsigned)value;
             break;
+        case ZL_CParam_serialBackendSearch:
+            ZL_ERR_IF_LT(value, 0, parameter_invalid);
+            ZL_ERR_IF_GT(value, ZL_SerialBackendSearch_all, parameter_invalid);
+            gcparams->serialBackendSearch = (unsigned)value;
+            break;
         case ZL_CParam_formatVersion:
             if (!(value == 0 || ZL_isFormatVersionSupported((uint32_t)value)))
                 ZL_ERR(formatVersion_unsupported);
@@ -158,6 +166,7 @@ void GCParams_applyDefaults(GCParams* dst, const GCParams* defaults)
     SET_DEFAULT(dst, defaults, contentChecksum);
     SET_DEFAULT(dst, defaults, storeOnExpansion);
     SET_DEFAULT(dst, defaults, minStreamSize);
+    SET_DEFAULT(dst, defaults, serialBackendSearch);
 }
 #undef SET_DEFAULT
 
@@ -208,6 +217,8 @@ int GCParams_getParameter(const GCParams* gcparams, ZL_CParam paramId)
             return (int)gcparams->storeOnExpansion;
         case ZL_CParam_minStreamSize:
             return (int)gcparams->minStreamSize;
+        case ZL_CParam_serialBackendSearch:
+            return (int)gcparams->serialBackendSearch;
         default:
             return 0;
     }

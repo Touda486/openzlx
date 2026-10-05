@@ -7,11 +7,13 @@
 #include "openzl/cpp/codecs/Bitsplit.hpp"         // IWYU pragma: export
 #include "openzl/cpp/codecs/Bitunpack.hpp"        // IWYU pragma: export
 #include "openzl/cpp/codecs/BruteForce.hpp"       // IWYU pragma: export
+#include "openzl/cpp/codecs/Bzip3.hpp"            // IWYU pragma: export
 #include "openzl/cpp/codecs/Compress.hpp"         // IWYU pragma: export
 #include "openzl/cpp/codecs/Concat.hpp"           // IWYU pragma: export
 #include "openzl/cpp/codecs/Constant.hpp"         // IWYU pragma: export
 #include "openzl/cpp/codecs/Conversion.hpp"       // IWYU pragma: export
 #include "openzl/cpp/codecs/Dedup.hpp"            // IWYU pragma: export
+#include "openzl/cpp/codecs/Deflate.hpp"          // IWYU pragma: export
 #include "openzl/cpp/codecs/Delta.hpp"            // IWYU pragma: export
 #include "openzl/cpp/codecs/Dispatch.hpp"         // IWYU pragma: export
 #include "openzl/cpp/codecs/DivideBy.hpp"         // IWYU pragma: export
@@ -22,6 +24,7 @@
 #include "openzl/cpp/codecs/Illegal.hpp"          // IWYU pragma: export
 #include "openzl/cpp/codecs/Lz.hpp"               // IWYU pragma: export
 #include "openzl/cpp/codecs/Lz4.hpp"              // IWYU pragma: export
+#include "openzl/cpp/codecs/Lzma2.hpp"            // IWYU pragma: export
 #include "openzl/cpp/codecs/MergeSorted.hpp"      // IWYU pragma: export
 #include "openzl/cpp/codecs/MuxLengths.hpp"       // IWYU pragma: export
 #include "openzl/cpp/codecs/ParseInt.hpp"         // IWYU pragma: export

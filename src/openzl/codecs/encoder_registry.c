@@ -8,10 +8,12 @@
 #include "openzl/codecs/bitSplit/encode_bitsplit_top8_binding.h"
 #include "openzl/codecs/bitpack/encode_bitpack_binding.h"
 #include "openzl/codecs/bitunpack/encode_bitunpack_binding.h"
+#include "openzl/codecs/bzip3/encode_bzip3_binding.h"
 #include "openzl/codecs/concat/encode_concat_binding.h"
 #include "openzl/codecs/constant/encode_constant_binding.h"
 #include "openzl/codecs/conversion/encode_conversion_binding.h"
 #include "openzl/codecs/dedup/encode_dedup_binding.h"
+#include "openzl/codecs/deflate/encode_deflate_binding.h"
 #include "openzl/codecs/delta/encode_delta_binding.h"
 #include "openzl/codecs/dispatchN_byTag/encode_dispatchN_byTag_binding.h"
 #include "openzl/codecs/dispatch_string/encode_dispatch_string_binding.h"
@@ -22,6 +24,7 @@
 #include "openzl/codecs/interleave/encode_interleave_binding.h"
 #include "openzl/codecs/lz/encode_lz_binding.h"
 #include "openzl/codecs/lz4/encode_lz4_binding.h"
+#include "openzl/codecs/lzma2/encode_lzma2_binding.h"
 #include "openzl/codecs/merge_sorted/encode_merge_sorted_binding.h"
 #include "openzl/codecs/mux_lengths/encode_mux_lengths_binding.h"
 #include "openzl/codecs/parse_int/encode_parse_int_binding.h"
@@ -163,6 +166,9 @@ const CNode ER_standardNodes[STANDARD_ENCODERS_NB] = {
     REGISTER_TRANSFORM(ZL_PrivateStandardNodeID_lz4, ZL_StandardTransformID_lz4, 23, 200, EI_LZ4),
     REGISTER_TRANSFORM(ZL_PrivateStandardNodeID_bitSplit, ZL_StandardTransformID_bitSplit, 24, 200, EI_BITSPLIT),
     REGISTER_TRANSFORM(ZL_PrivateStandardNodeID_pivco_huffman, ZL_StandardTransformID_pivco_huffman, 27, 203, EI_PIVCO_HUFFMAN),
+    REGISTER_TRANSFORM(ZL_PrivateStandardNodeID_deflate, ZL_StandardTransformID_deflate, 28, 300, EI_DEFLATE),
+    REGISTER_TRANSFORM(ZL_PrivateStandardNodeID_lzma2, ZL_StandardTransformID_lzma2, 28, 300, EI_LZMA2),
+    REGISTER_TRANSFORM(ZL_PrivateStandardNodeID_bzip3, ZL_StandardTransformID_bzip3, 28, 300, EI_BZIP3),
 
     // Deprecated Nodes
     REGISTER_DEPRECATED_TRANSFORM(ZL_PrivateStandardNodeID_rolz_deprecated, ZL_StandardTransformID_rolz, 3, 12, 200, EI_ROLZ),
