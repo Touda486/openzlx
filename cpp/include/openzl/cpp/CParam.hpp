@@ -15,5 +15,7 @@ enum class CParam {
     ContentChecksum       = ZL_CParam_contentChecksum,
     StoreOnExpansion      = ZL_CParam_storeOnExpansion,
     MinStreamSize         = ZL_CParam_minStreamSize,
+    NbWorkers             = ZL_CParam_nbWorkers,
+    MtMinTaskSize         = ZL_CParam_mtMinTaskSize,
 };
 }

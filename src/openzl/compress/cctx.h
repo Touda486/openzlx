@@ -715,6 +715,26 @@ size_t CCTX_arenaMemory(const ZL_CCtx* cctx);
  */
 size_t CCTX_sizeof(const ZL_CCtx* cctx);
 
+/* Testing flags for multi-threaded compression (see ZL_CParam_nbWorkers).
+ * They only matter when nbWorkers > 1.
+ * CCTX_MT_FORCE_OFFLOAD : offload all eligible successors, whatever their size
+ * CCTX_MT_SYNCHRONOUS : run offloaded successors on the calling thread,
+ *                       without thread pool, even if ZL_MULTITHREAD is 0
+ */
+#define CCTX_MT_FORCE_OFFLOAD 1u
+#define CCTX_MT_SYNCHRONOUS 2u
+void CCTX_setMTTestingFlags(ZL_CCtx* cctx, unsigned flags);
+
+/* Statistics of multi-threaded compression, for the last compression.
+ * nbSpliced : successors compressed by worker contexts
+ * nbFallbacks : offloaded successors run again serially
+ *               (worker failure, or frame limits) */
+typedef struct {
+    size_t nbSpliced;
+    size_t nbFallbacks;
+} CCTX_MTStats;
+CCTX_MTStats CCTX_getMTStats(const ZL_CCtx* cctx);
+
 /**
  * @brief runs a Graph and all its sub-graphs within cctx.
  *

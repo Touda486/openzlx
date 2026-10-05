@@ -95,7 +95,9 @@ void registerCParam(nb::module_& m)
             .value("PermissiveCompression", CParam::PermissiveCompression)
             .value("CompressedChecksum", CParam::CompressedChecksum)
             .value("ContentChecksum", CParam::ContentChecksum)
-            .value("MinStreamSize", CParam::MinStreamSize);
+            .value("MinStreamSize", CParam::MinStreamSize)
+            .value("NbWorkers", CParam::NbWorkers)
+            .value("MtMinTaskSize", CParam::MtMinTaskSize);
 }
 
 void registerDParam(nb::module_& m)

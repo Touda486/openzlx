@@ -46,6 +46,24 @@ static ZL_PoolJob* ZL_ThreadPool_dequeueHead(ZL_ThreadPool* pool)
     return job;
 }
 
+// Removes queued @job from the queue. @mutex must be held.
+static void ZL_ThreadPool_unlink(ZL_ThreadPool* pool, ZL_PoolJob* job)
+{
+    ZL_ASSERT_EQ(job->state, job_queued);
+    ZL_PoolJob** link = &pool->head;
+    ZL_PoolJob* prev  = NULL;
+    while (*link != job) {
+        ZL_ASSERT_NN(*link);
+        prev = *link;
+        link = &(*link)->next;
+    }
+    *link = job->next;
+    if (pool->tail == job) {
+        pool->tail = prev;
+    }
+    job->next = NULL;
+}
+
 static void* ZL_ThreadPool_worker(void* opaque)
 {
     ZL_ThreadPool* const pool = (ZL_ThreadPool*)opaque;
@@ -164,19 +182,8 @@ void ZL_ThreadPool_waitOrRun(ZL_ThreadPool* pool, ZL_PoolJob* job)
     pthread_mutex_lock(&pool->mutex);
     ZL_ASSERT_NE(job->state, job_idle, "job was never submitted");
     if (job->state == job_queued) {
-        // Not started yet: dequeue it, and run it on the calling thread
-        ZL_PoolJob** link = &pool->head;
-        ZL_PoolJob* prev  = NULL;
-        while (*link != job) {
-            ZL_ASSERT_NN(*link);
-            prev = *link;
-            link = &(*link)->next;
-        }
-        *link = job->next;
-        if (pool->tail == job) {
-            pool->tail = prev;
-        }
-        job->next = NULL;
+        // Not started yet: run it on the calling thread
+        ZL_ThreadPool_unlink(pool, job);
         ZL_ThreadPool_runJob(pool, job);
     }
     while (job->state != job_done) {
@@ -191,6 +198,20 @@ void ZL_ThreadPool_waitOrRun(ZL_ThreadPool* pool, ZL_PoolJob* job)
     }
     job->state = job_idle;
     pthread_mutex_unlock(&pool->mutex);
+}
+
+int ZL_ThreadPool_cancel(ZL_ThreadPool* pool, ZL_PoolJob* job)
+{
+    ZL_ASSERT_NN(pool);
+    ZL_ASSERT_NN(job);
+    pthread_mutex_lock(&pool->mutex);
+    int const cancelled = (job->state == job_queued);
+    if (cancelled) {
+        ZL_ThreadPool_unlink(pool, job);
+        job->state = job_idle;
+    }
+    pthread_mutex_unlock(&pool->mutex);
+    return cancelled;
 }
 
 #else // ZL_MULTITHREAD
@@ -224,6 +245,14 @@ void ZL_ThreadPool_waitOrRun(ZL_ThreadPool* pool, ZL_PoolJob* job)
     (void)pool;
     (void)job;
     ZL_ASSERT_FAIL("ZL_MULTITHREAD is disabled");
+}
+
+int ZL_ThreadPool_cancel(ZL_ThreadPool* pool, ZL_PoolJob* job)
+{
+    (void)pool;
+    (void)job;
+    ZL_ASSERT_FAIL("ZL_MULTITHREAD is disabled");
+    return 0;
 }
 
 #endif // ZL_MULTITHREAD

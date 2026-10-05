@@ -409,6 +409,13 @@ void RTGM_setStreamAttributes(
     rtcs->protectRank      = protectRank;
 }
 
+unsigned RTGM_getProtectRank(const RTGraph* rtgraph, RTStreamID rtstreamid)
+{
+    ZL_ASSERT_NN(rtgraph);
+    ZL_ASSERT_LT(rtstreamid.rtsid, VECTOR_SIZE(rtgraph->streams));
+    return VECTOR_AT(rtgraph->streams, rtstreamid.rtsid).protectRank;
+}
+
 static ZL_RESULT_OF(RTStreamID) RTGM_appendStoredCopy(
         RTGraph* dst,
         const ZL_Data* stream)

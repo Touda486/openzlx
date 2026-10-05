@@ -1,5 +1,7 @@
 // (c) Meta Platforms, Inc. and affiliates.
 
+#include <string_view>
+
 #include <gtest/gtest.h>
 
 #include "openzl/cpp/CCtx.hpp"
@@ -8,6 +10,7 @@
 #include "openzl/cpp/DCtx.hpp"
 #include "openzl/cpp/FunctionGraph.hpp"
 #include "openzl/cpp/codecs/Store.hpp"
+#include "openzl/compress/cctx.h" // CCTX_setMTTestingFlags
 #include "openzl/zl_reflection.h"
 #include "tests/registry/OpenZLComponents.h"
 #include "tests/registry/OpenZLInput.h"
@@ -46,7 +49,7 @@ class OpenZLComponentTest : public ::testing::TestWithParam<int> {
         auto inputs = input.inputs();
         std::string compressed;
         compressed.resize(component_->compressBound(inputs));
-        testRoundTrip(
+        const size_t csize = testRoundTrip(
                 compressed,
                 compressor_,
                 cctx_,
@@ -54,6 +57,26 @@ class OpenZLComponentTest : public ::testing::TestWithParam<int> {
                 graph,
                 formatVersion,
                 inputs);
+
+        // Parallel compression must produce the exact same frame.
+        // Offload all successors, whatever their size, to exercise splicing.
+        std::string compressedMT;
+        compressedMT.resize(compressed.size());
+        cctx_.setParameter(CParam::NbWorkers, 4);
+        CCTX_setMTTestingFlags(cctx_.get(), CCTX_MT_FORCE_OFFLOAD);
+        const size_t csizeMT = testRoundTrip(
+                compressedMT,
+                compressor_,
+                cctx_,
+                dctx_,
+                graph,
+                formatVersion,
+                inputs);
+        CCTX_setMTTestingFlags(cctx_.get(), 0);
+        ASSERT_EQ(
+                std::string_view(compressed.data(), csize),
+                std::string_view(compressedMT.data(), csizeMT))
+                << "Parallel compression changed the compressed frame";
     }
 
     void testComponentWithGraphOnInput(GraphID graph, const OpenZLInput& input)

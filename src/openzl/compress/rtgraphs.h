@@ -285,6 +285,9 @@ void RTGM_setStreamAttributes(
         ZL_IDType outcomeID,
         unsigned protectRank);
 
+// Note : rtsid **must** be valid.
+unsigned RTGM_getProtectRank(const RTGraph* rtgraph, RTStreamID rtsid);
+
 // RTGM_storeStream() :
 // Tag the stream to be stored into final frame at collection stage.
 // @rtsid must be valid

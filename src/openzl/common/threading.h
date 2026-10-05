@@ -71,6 +71,14 @@ void ZL_ThreadPool_submit(ZL_ThreadPool* pool, ZL_PoolJob* job);
  */
 void ZL_ThreadPool_waitOrRun(ZL_ThreadPool* pool, ZL_PoolJob* job);
 
+/**
+ * Removes @p job from the queue if no thread has started it yet.
+ * @returns 1 if @p job was cancelled (it will never run, and its storage can
+ * be reused), 0 if it is already running or completed, in which case the
+ * caller must still invoke ZL_ThreadPool_waitOrRun().
+ */
+int ZL_ThreadPool_cancel(ZL_ThreadPool* pool, ZL_PoolJob* job);
+
 ZL_END_C_DECLS
 
 #endif // OPENZL_COMMON_THREADING_H
