@@ -99,6 +99,14 @@ struct CompressArgs : public GlobalArgs, public ProfileArgs {
                 'D',
                 true,
                 "Path to a fat dict bundle (.zd) file to load for compression.");
+        parser.addCommandFlag(
+                cmd(),
+                kThreads,
+                'T',
+                true,
+                "Number of threads used to compress independent streams "
+                "(e.g. columns) in parallel. The compressed output doesn't "
+                "depend on it (default: 1).");
     }
 
     explicit CompressArgs(const arg::ParsedArgs& parsed)
@@ -151,6 +159,15 @@ struct CompressArgs : public GlobalArgs, public ProfileArgs {
         } else if (parsed.cmdHasFlag(cmd(), kStoreOnExpansion)) {
             storeOnExpansion = true;
         }
+        if (parsed.cmdHasFlag(cmd(), kThreads)) {
+            threads = util::checkedstoiExact(
+                    parsed.cmdFlag(cmd(), kThreads).value());
+            if (threads < 1 || threads > ZL_NBWORKERS_MAX) {
+                throw InvalidArgsException(
+                        "--threads must be between 1 and "
+                        + std::to_string(ZL_NBWORKERS_MAX));
+            }
+        }
     }
 
     static Cmd cmd()
@@ -171,6 +188,7 @@ struct CompressArgs : public GlobalArgs, public ProfileArgs {
     bool storeOnExpansion = true;
     std::optional<int> compressionLevel;
     std::string dictBundleData;
+    int threads = 1;
 
    private:
     inline static const std::string kInput      = "input";
@@ -192,6 +210,7 @@ struct CompressArgs : public GlobalArgs, public ProfileArgs {
     inline static const std::string kNoStoreOnExpansion =
             "no-store-on-expansion";
     inline static const std::string kDictBundle = "dict-bundle";
+    inline static const std::string kThreads    = "threads";
 };
 
 } // namespace openzl::cli

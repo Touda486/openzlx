@@ -162,6 +162,7 @@ int performCompression(const CompressArgs& args)
         cctx.setParameter(
                 CParam::CompressionLevel, args.compressionLevel.value());
     }
+    cctx.setParameter(CParam::NbWorkers, args.threads);
     cctx.refCompressor(*args.compressor());
     if (args.traceOutput) {
         args.traceOutput->open();
