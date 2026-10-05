@@ -167,7 +167,8 @@ struct ZL_CCtx_s {
     int inBackupMode; // tracks when graph is in backup mode, to avoid looping
     unsigned segmenterDepth; // 0 until a segmenter starts, then its depth
     /* Multi-threading, see CCTX_runSuccessorsMT() */
-    ZL_ThreadPool* pool; // owned; lazily created
+    ZL_ThreadPool* pool;       // owned; lazily created
+    ZL_ThreadPool* sharedPool; // borrowed from the parent, for worker contexts
     VECTOR_POINTERS(ZL_CCtx) idleChildren; // owned; reusable worker contexts
     ZL_DataArenaType dataArenaType;        // forwarded to worker contexts
     unsigned mtTestingFlags;               // CCTX_MT_* flags
@@ -1523,9 +1524,11 @@ ZL_Report CCTX_runSuccessor(
  * identical to serial compression, whatever the number of threads.
  *
  * Rules:
- * - Only the calling thread fans out. Worker contexts run serially.
+ * - Worker contexts can fan out their own successors, on the thread pool of
+ *   the top-level context. Each context only touches its own state, and its
+ *   own pool of child contexts, so nesting needs no extra synchronization.
  * - Workers never access the parent context: everything they need is
- *   prepared by the calling thread at submission time. They only read the
+ *   prepared by the parent's thread at submission time. They only read the
  *   content of their input streams, which the parent doesn't modify nor
  *   release until the successor is spliced.
  * - If a worker fails, or its result can't be spliced (e.g. frame limits),
@@ -1545,6 +1548,11 @@ typedef struct {
     int offload;
     int submitted;
 } CCTX_SubtreeTask;
+
+static ZL_ThreadPool* CCTX_threadPool(const ZL_CCtx* cctx)
+{
+    return cctx->isWorkerChild ? cctx->sharedPool : cctx->pool;
+}
 
 static ZL_CCtx* CCTX_acquireChild(ZL_CCtx* cctx)
 {
@@ -1607,6 +1615,9 @@ static ZL_Report CCTX_prepareSubtree(
     // requested parameters are used by nested tryGraph contexts
     GCParams_copy(&child->requestedGCParams, &cctx->requestedGCParams);
     GCParams_copy(&child->appliedGCParams, &cctx->appliedGCParams);
+    child->sharedPool     = CCTX_threadPool(cctx);
+    child->mtTestingFlags = cctx->mtTestingFlags;
+    child->mtStats        = (CCTX_MTStats){ 0 };
     child->attachedCodecOutputCache         = NULL;
     child->tryGraphCodecOutputCacheMaxBytes = cctx->tryGraphCodecOutputCacheMaxBytes;
     CCTX_setTryGraphCacheStatsEnabled(
@@ -1727,8 +1738,9 @@ static ZL_Report CCTX_finishSubtree(
                 CCTX_clearSuccessorInputs(
                         cctx, si->rtInputs, si->nbInputs, depth);
                 ZL_OC_adoptErrorsAndWarnings(&cctx->opCtx, &child->opCtx);
+                cctx->mtStats.nbSpliced += 1 + child->mtStats.nbSpliced;
+                cctx->mtStats.nbFallbacks += child->mtStats.nbFallbacks;
                 CCTX_releaseChild(cctx, child);
-                cctx->mtStats.nbSpliced++;
                 return ZL_returnSuccess();
             }
             // Undo the guard
@@ -1819,7 +1831,7 @@ static int CCTX_mtEligible(const ZL_CCtx* cctx, size_t nbSuccessors)
     if (!ZL_MULTITHREAD && !(cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS)) {
         return 0;
     }
-    if (cctx->isWorkerChild || cctx->fanOutDisabled || cctx->inBackupMode) {
+    if (cctx->fanOutDisabled || cctx->inBackupMode) {
         return 0;
     }
     // Introspection hooks observe the serial execution order
@@ -1838,6 +1850,11 @@ static int CCTX_mtEligible(const ZL_CCtx* cctx, size_t nbSuccessors)
 static ZL_Report CCTX_ensureThreadPool(ZL_CCtx* cctx, unsigned nbThreads)
 {
     ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
+    if (cctx->isWorkerChild) {
+        // Worker contexts use the pool of the top-level context
+        ZL_ERR_IF_NULL(cctx->sharedPool, allocation);
+        return ZL_returnSuccess();
+    }
     if (ZL_ThreadPool_nbThreads(cctx->pool) != nbThreads) {
         // Only possible between compressions: nbWorkers is fixed during one
         ZL_ThreadPool_free(cctx->pool);
@@ -1879,7 +1896,7 @@ static int CCTX_runSuccessorsMT(
             nbSuccessors,
             depth);
 
-    // Bound the number of subtrees held in memory at the same time
+    // Bound the number of subtrees held in memory at the same time, per level
     size_t const window = synchronous ? 1 : 2 * (size_t)nbWorkers;
     size_t nextSubmit   = 0;
     size_t nbInFlight   = 0;
@@ -1897,7 +1914,7 @@ static int CCTX_runSuccessorsMT(
                     task->offload = 0; // run it serially instead
                 } else {
                     if (!synchronous) {
-                        ZL_ThreadPool_submit(cctx->pool, &task->job);
+                        ZL_ThreadPool_submit(CCTX_threadPool(cctx), &task->job);
                     }
                     task->submitted = 1;
                     nbInFlight++;
@@ -1913,7 +1930,7 @@ static int CCTX_runSuccessorsMT(
             if (synchronous) {
                 CCTX_runSubtreeJob(task);
             } else {
-                ZL_ThreadPool_waitOrRun(cctx->pool, &task->job);
+                ZL_ThreadPool_waitOrRun(CCTX_threadPool(cctx), &task->job);
             }
             task->submitted = 0;
             nbInFlight--;
@@ -1938,8 +1955,8 @@ static int CCTX_runSuccessorsMT(
         if (!task->submitted) {
             continue;
         }
-        if (!synchronous && !ZL_ThreadPool_cancel(cctx->pool, &task->job)) {
-            ZL_ThreadPool_waitOrRun(cctx->pool, &task->job);
+        if (!synchronous && !ZL_ThreadPool_cancel(CCTX_threadPool(cctx), &task->job)) {
+            ZL_ThreadPool_waitOrRun(CCTX_threadPool(cctx), &task->job);
         }
         CCTX_releaseChild(cctx, task->child);
     }

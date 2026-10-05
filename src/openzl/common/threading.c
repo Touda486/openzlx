@@ -11,6 +11,14 @@ enum { job_idle = 0, job_queued, job_running, job_done };
 
 #    include <pthread.h>
 
+/* While waiting for a job, a thread runs other queued jobs. These run on top
+ * of the waiting job's stack, and may wait (and help) in turn: bound the
+ * nesting to bound the stack usage. Not helping is always safe: a waiting
+ * thread runs the awaited job itself if it's not started yet, and running jobs
+ * never transitively wait for a job started after them. */
+#    define ZL_POOL_MAX_HELP_DEPTH 4
+static _Thread_local int g_helpDepth = 0;
+
 struct ZL_ThreadPool_s {
     pthread_mutex_t mutex;
     pthread_cond_t jobAvailable; // signaled when a job is queued, or on exit
@@ -189,9 +197,13 @@ void ZL_ThreadPool_waitOrRun(ZL_ThreadPool* pool, ZL_PoolJob* job)
     while (job->state != job_done) {
         // @job is running on another thread:
         // help with other queued jobs while waiting
-        ZL_PoolJob* const other = ZL_ThreadPool_dequeueHead(pool);
+        ZL_PoolJob* const other = (g_helpDepth < ZL_POOL_MAX_HELP_DEPTH)
+                ? ZL_ThreadPool_dequeueHead(pool)
+                : NULL;
         if (other != NULL) {
+            g_helpDepth++;
             ZL_ThreadPool_runJob(pool, other);
+            g_helpDepth--;
         } else {
             pthread_cond_wait(&pool->jobDone, &pool->mutex);
         }
