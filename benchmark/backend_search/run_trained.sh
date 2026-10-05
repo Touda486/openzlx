@@ -19,6 +19,10 @@ train() {
     local name="$1" input="$2"
     shift 2
     mkdir -p "$OUT/trained"
+    if [[ "$RESUME" == 1 && -s "$OUT/trained/$name.zc" ]]; then
+        echo "[train] $name: already done"
+        return
+    fi
     echo "[train] $name"
     "$ZLI" train "$@" "$input" -o "$OUT/trained/$name.zc" -f \
         --max-time-secs "$TRAIN_SECS" --threads "$THREADS" \

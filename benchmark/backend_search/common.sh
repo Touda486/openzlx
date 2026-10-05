@@ -6,6 +6,8 @@ ZLI="${ZLI:-$ROOT/zli}"
 DATASETS="${DATASETS:-$HOME/datasets}"
 OUT="${OUT:-$ROOT/benchmark/backend_search/results}"
 ITERS="${ITERS:-1}"
+# With RESUME=1, steps whose results already exist are skipped
+RESUME="${RESUME:-0}"
 
 SILESIA="$DATASETS/silesia"
 SAO_DIR="$DATASETS/silesia_sao" # the sao profile only applies to the sao file
@@ -24,6 +26,10 @@ bench() {
     local name="$1" input="$2"
     shift 2
     mkdir -p "$OUT/bench"
+    if [[ "$RESUME" == 1 && -s "$OUT/bench/$name.csv" ]]; then
+        echo "[bench] $name: already done"
+        return
+    fi
     echo "[bench] $name"
     "$ZLI" benchmark "$@" -n "$ITERS" --output-csv "$OUT/bench/$name.csv" \
         "$input" > "$OUT/bench/$name.log" 2>&1
@@ -44,6 +50,9 @@ trace() {
     for f in "$input"/*; do
         local base
         base="$(basename "$f")"
+        if [[ "$RESUME" == 1 && -s "$dir/$base.cbor" ]]; then
+            continue
+        fi
         "$ZLI" compress "$@" "$f" -o "$tmp/$base.zl" -f > /dev/null 2>&1
         "$ZLI" decompress "$tmp/$base.zl" -o "$tmp/$base" -f \
             --trace "$dir/$base.cbor" --no-stream-preview > /dev/null 2>&1

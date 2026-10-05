@@ -21,7 +21,8 @@ TRAIN_SECS=600 benchmark/backend_search/run_trained.sh
 benchmark/backend_search/summarize.py    # writes results/summary.{md,json}
 ```
 
-`ITERS` (default 1) sets the benchmark iterations; `DATASETS`, `OUT` and `ZLI`
+`RESUME=1` skips the steps whose results already exist, to continue an
+interrupted run. `ITERS` (default 1) sets the benchmark iterations; `DATASETS`, `OUT` and `ZLI`
 override the paths. Timings are only meaningful on an otherwise idle machine.
 
 Silesia is a set of unrelated files: trained compressors are evaluated on the
