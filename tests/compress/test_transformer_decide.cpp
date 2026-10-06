@@ -652,7 +652,7 @@ TEST(TransformerDecisionTest, OperationMaskSelectsBestSupportedGraph)
     EXPECT_EQ(
             SI_transformer_select_supported_graph(gcdDecision, noneSupported)
                     .gid,
-            ZL_GRAPH_ZSTD.gid);
+            ZL_GRAPH_SERIAL_COMPRESS.gid);
     EXPECT_EQ(
             SI_transformer_select_supported_graph(gcdDecision, gcdSupported)
                     .gid,
@@ -679,7 +679,7 @@ TEST(TransformerDecisionTest, OperationMaskSelectsBestSupportedGraph)
     EXPECT_EQ(
             SI_transformer_select_supported_graph(sparseDecision, noneSupported)
                     .gid,
-            ZL_GRAPH_ZSTD.gid);
+            ZL_GRAPH_SERIAL_COMPRESS.gid);
     EXPECT_EQ(
             SI_transformer_select_supported_graph(
                     sparseDecision, sparseSupported)

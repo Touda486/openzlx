@@ -300,7 +300,7 @@ smooth_data_check(const void* data, size_t n, size_t elt_w, uint64_t range_u)
 
 static ZL_GraphID static_terminal_graph(size_t elt_w)
 {
-    return elt_w == 1 ? ZL_GRAPH_ZSTD : ZL_GRAPH_FIELD_LZ;
+    return elt_w == 1 ? ZL_GRAPH_SERIAL_COMPRESS : ZL_GRAPH_FIELD_LZ;
 }
 
 /* Ordered policy: trivial and depth exits, delta_int, zigzag, divide_by_gcd,

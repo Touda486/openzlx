@@ -137,7 +137,7 @@ static ZL_GraphID transformer_graph_for_operation(
         case TRS_GENERIC_NUMERIC_OP_TOKENIZE_NUMERIC_SORTED:
             return ZL_GRAPH_TRANSFORMER_TOKENIZE_NUMERIC_SORTED;
         case TRS_GENERIC_NUMERIC_OP_ZSTD:
-            return ZL_GRAPH_ZSTD;
+            return ZL_GRAPH_SERIAL_COMPRESS;
         case TRS_GENERIC_NUMERIC_OP_INVALID:
         case TRS_GENERIC_NUMERIC_OP_COUNT:
             return ZL_GRAPH_TRANSFORMER_STATIC_FALLBACK;

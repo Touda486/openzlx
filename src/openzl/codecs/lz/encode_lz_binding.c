@@ -12,6 +12,7 @@
 #include "openzl/codecs/zl_mux_lengths.h"
 #include "openzl/codecs/zl_partition.h"
 #include "openzl/compress/dyngraph_interface.h"
+#include "openzl/compress/private_nodes.h" // ZL_GRAPH_SERIAL_COMPRESS
 #include "openzl/shared/utils.h"
 #include "openzl/shared/varint.h"
 #include "openzl/zl_ctransform.h"
@@ -334,7 +335,7 @@ ZL_Report EI_fieldLzDynGraph(ZL_Graph* gctx, ZL_Edge* inputs[], size_t nbIns)
     // Call to Zstd for unsupported widths
     size_t const eltWidth = ZL_Input_eltWidth(in);
     if (!(eltWidth == 2 || eltWidth == 4 || eltWidth == 8)) {
-        return ZL_Edge_setDestination(input, ZL_GRAPH_ZSTD);
+        return ZL_Edge_setDestination(input, ZL_GRAPH_SERIAL_COMPRESS);
     }
 
     // Convert to struct

@@ -154,6 +154,29 @@ TEST_F(TestCodecs, serialBackendSearch)
     EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, -1));
 }
 
+TEST_F(TestCodecs, serialBackendSearchReplacesZstdBackends)
+{
+    // Field LZ sends 3-byte structs to the generic serial backend
+    std::string data;
+    for (int i = 0; data.size() < 300000; ++i) {
+        const int v = (i * 7919) % 1013;
+        data += { char(v & 0xFF), char(v >> 8), char(i % 3) };
+    }
+    auto compressedSize = [&](int search) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.setParameter(CParam::SerialBackendSearch, search);
+        compressor.selectStartingGraph(ZL_GRAPH_FIELD_LZ);
+        return testRoundTrip(
+                       compressor, Input::refStruct(data.data(), 3, data.size() / 3))
+                .size();
+    };
+    const size_t zstd = compressedSize(0);
+    EXPECT_EQ(compressedSize(ZL_SerialBackendSearch_zstd), zstd);
+    EXPECT_NE(compressedSize(ZL_SerialBackendSearch_lzma2), zstd);
+    EXPECT_LT(compressedSize(ZL_SerialBackendSearch_all), zstd);
+}
+
 TEST_F(TestCodecs, serialBackendSearchSampling)
 {
     // Large enough for the backends to be ranked on small samples first

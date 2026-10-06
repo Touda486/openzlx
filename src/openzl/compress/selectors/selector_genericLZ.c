@@ -1,6 +1,7 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "openzl/compress/selectors/selector_genericLZ.h"
+#include "openzl/compress/private_nodes.h" // ZL_GRAPH_SERIAL_COMPRESS
 #include "openzl/zl_public_nodes.h"
 // #include "openzl/common/assertion.h"
 
@@ -25,5 +26,5 @@ ZL_GraphID SI_selector_genericLZ(
     (void)inputStream;
     (void)customGraphs;
     (void)nbCustomGraphs;
-    return ZL_GRAPH_ZSTD;
+    return ZL_GRAPH_SERIAL_COMPRESS;
 }

@@ -171,9 +171,11 @@ typedef enum {
     /// @default 0 currently means enabled, preserving existing behavior.
     ZL_CParam_storeOnExpansion = 12,
 
-    /// Experimental: lets ZL_GRAPH_COMPRESS_GENERIC pick the backend of serial
-    /// streams among several general purpose codecs, by actually trying each
-    /// of them and keeping the smallest result. This is slow.
+    /// Experimental: lets ZL_GRAPH_COMPRESS_GENERIC, and the standard graphs
+    /// which otherwise end with zstd (numeric transforms, field LZ, ...), pick
+    /// the backend of serial streams among several general purpose codecs,
+    /// by actually trying each of them and keeping the smallest result.
+    /// This is slow.
     /// Valid values are bitmasks of ZL_SerialBackendSearch_*, selecting the
     /// candidates. A single candidate is used directly, without any trial.
     /// Candidates unsupported by the format version are ignored, and if none

@@ -226,7 +226,7 @@ const InternalGraphDesc GR_standardGraphs[ZL_PrivateStandardGraphID_end] = {
 
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_huffman_internal, "!zl.private.delta_huffman_internal", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_StandardGraphID_huffman), 200 ),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_flatpack_internal, "!zl.private.flatpack_internal", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_StandardGraphID_flatpack), 200 ),
-    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_zstd_internal, "!zl.private.zstd_internal", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_StandardGraphID_zstd), 200 ),
+    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_zstd_internal, "!zl.private.zstd_internal", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_PrivateStandardGraphID_serial_compress), 200 ),
 
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_huffman, "!zl.private.delta_huffman", ZL_Type_serial, ZL_StandardNodeID_convert_serial_to_num8, _1_SUCCESSOR(ZL_PrivateStandardGraphID_delta_huffman_internal), 200 ),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_flatpack, "!zl.private.delta_flatpack", ZL_Type_serial, ZL_StandardNodeID_convert_serial_to_num8, _1_SUCCESSOR(ZL_PrivateStandardGraphID_delta_flatpack_internal), 200 ),
@@ -234,7 +234,7 @@ const InternalGraphDesc GR_standardGraphs[ZL_PrivateStandardGraphID_end] = {
 
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_delta_field_lz, "!zl.private.delta_field_lz", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_StandardGraphID_field_lz), 200 ),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_range_pack, "!zl.private.range_pack", ZL_Type_numeric, ZL_StandardNodeID_range_pack, _1_SUCCESSOR(ZL_StandardGraphID_field_lz), 200 ),
-    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_range_pack_zstd, "!zl.private.range_pack_zstd", ZL_Type_numeric, ZL_StandardNodeID_range_pack, _1_SUCCESSOR(ZL_StandardGraphID_zstd), 200 ),
+    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_range_pack_zstd, "!zl.private.range_pack_zstd", ZL_Type_numeric, ZL_StandardNodeID_range_pack, _1_SUCCESSOR(ZL_PrivateStandardGraphID_serial_compress), 200 ),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_tokenize_delta_field_lz, "!zl.private.tokenize_delta_field_lz", ZL_Type_numeric, ZL_PrivateStandardNodeID_tokenize_sorted, _2_SUCCESSORS(ZL_PrivateStandardGraphID_delta_field_lz, ZL_StandardGraphID_field_lz), 200 ),
 
     REGISTER_DYNAMIC_GRAPH(ZL_PrivateStandardGraphID_split_serial, "!zl.private.split_serial", ZL_Type_serial, ZL_splitFnGraph, 200),
@@ -273,9 +273,9 @@ const InternalGraphDesc GR_standardGraphs[ZL_PrivateStandardGraphID_end] = {
     REGISTER_SELECTOR(ZL_PrivateStandardGraphID_transformer_static_index, "!zl.private.transformer_static_index", SI_transformer_static_index_select, ZL_Type_numeric, TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_tok_sorted, "!zl.private.transformer_static_tok_sorted", ZL_Type_numeric, ZL_PrivateStandardNodeID_tokenize_sorted, _2_SUCCESSORS(ZL_PrivateStandardGraphID_transformer_static_delta, ZL_PrivateStandardGraphID_transformer_static_index), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_delta_tok, "!zl.private.transformer_static_delta_tok", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_PrivateStandardGraphID_transformer_static_tok_sorted), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
-    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_tok_mono, "!zl.private.transformer_static_tok_mono", ZL_Type_numeric, ZL_PrivateStandardNodeID_tokenize_sorted, _2_SUCCESSORS(ZL_StandardGraphID_zstd, ZL_StandardGraphID_entropy), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
+    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_tok_mono, "!zl.private.transformer_static_tok_mono", ZL_Type_numeric, ZL_PrivateStandardNodeID_tokenize_sorted, _2_SUCCESSORS(ZL_PrivateStandardGraphID_serial_compress, ZL_StandardGraphID_entropy), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_delta_tok_mono, "!zl.private.transformer_static_delta_tok_mono", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_PrivateStandardGraphID_transformer_static_tok_mono), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
-    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_tok_mono_lz, "!zl.private.transformer_static_tok_mono_lz", ZL_Type_numeric, ZL_PrivateStandardNodeID_tokenize_sorted, _2_SUCCESSORS(ZL_StandardGraphID_zstd, ZL_StandardGraphID_zstd), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
+    REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_tok_mono_lz, "!zl.private.transformer_static_tok_mono_lz", ZL_Type_numeric, ZL_PrivateStandardNodeID_tokenize_sorted, _2_SUCCESSORS(ZL_PrivateStandardGraphID_serial_compress, ZL_PrivateStandardGraphID_serial_compress), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
     REGISTER_STATIC_GRAPH(ZL_PrivateStandardGraphID_transformer_static_delta_tok_mono_lz, "!zl.private.transformer_static_delta_tok_mono_lz", ZL_Type_numeric, ZL_StandardNodeID_delta_int, _1_SUCCESSOR(ZL_PrivateStandardGraphID_transformer_static_tok_mono_lz), TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
     REGISTER_SELECTOR(ZL_PrivateStandardGraphID_transformer_static_fallback, "!zl.private.transformer_static_fallback", SI_transformer_static_fallback_select, ZL_Type_numeric, TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
     REGISTER_SELECTOR(ZL_PrivateStandardGraphID_transformer_numeric1, "!zl.private.transformer_numeric1", SI_transformer_numeric_select, ZL_Type_numeric, TRANSFORMER_NUMERIC_MIN_LIBRARY_VERSION),
