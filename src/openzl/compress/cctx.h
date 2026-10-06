@@ -727,13 +727,49 @@ void CCTX_setMTTestingFlags(ZL_CCtx* cctx, unsigned flags);
 
 /* Statistics of multi-threaded compression, for the last compression.
  * nbSpliced : successors compressed by worker contexts
- * nbFallbacks : offloaded successors run again serially
+ * nbChunks : segmenter chunks compressed by worker contexts
+ * nbFallbacks : offloaded successors or chunks run again serially
  *               (worker failure, or frame limits) */
 typedef struct {
     size_t nbSpliced;
+    size_t nbChunks;
     size_t nbFallbacks;
 } CCTX_MTStats;
 CCTX_MTStats CCTX_getMTStats(const ZL_CCtx* cctx);
+
+/**
+ * @brief Lets a worker context compress a segmenter chunk, in parallel.
+ *
+ * The chunk is appended to the frame later, by CCTX_waitChunks(), in
+ * submission order. @p inputs must remain valid until then; they are
+ * released with STREAM_free() once the chunk is written.
+ *
+ * @return 1 if the chunk was submitted, 0 if it must be compressed serially
+ * (in which case pending chunks must be written first, with
+ * CCTX_waitChunks(cctx, 0)).
+ */
+int CCTX_submitChunk(
+        ZL_CCtx* cctx,
+        ZL_Data* inputs[],
+        size_t nbInputs,
+        ZL_GraphID graphID,
+        const ZL_RuntimeGraphParameters* rgp,
+        unsigned depth);
+
+/// @returns the maximum number of chunks in flight,
+/// 0 when chunks are always compressed serially
+size_t CCTX_chunkWindow(const ZL_CCtx* cctx);
+
+/**
+ * @brief Writes submitted chunks into the frame, in submission order, until
+ * at most @p maxPending remain in flight.
+ *
+ * On error, all pending chunks are discarded.
+ */
+ZL_Report CCTX_waitChunks(ZL_CCtx* cctx, size_t maxPending);
+
+/// Discards all pending chunks, after an error.
+void CCTX_abortChunks(ZL_CCtx* cctx);
 
 /**
  * @brief runs a Graph and all its sub-graphs within cctx.

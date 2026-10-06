@@ -17,6 +17,7 @@
 #include "openzl/codecs/zl_field_lz.h"
 #include "openzl/codecs/zl_generic.h"
 #include "openzl/codecs/zl_lzma2.h"
+#include "openzl/codecs/zl_segmenters.h"
 #include "openzl/codecs/zl_split.h"
 #include "openzl/codecs/zl_zstd.h"
 #include "openzl/common/threading.h" // ZL_MULTITHREAD
@@ -202,11 +203,15 @@ class MTDeterminismTest : public ::testing::Test {
                 EXPECT_TRUE(mt == serial) << toString(config);
                 if (nbWorkers > 1 && expectOffload
                     && (flags & CCTX_MT_FORCE_OFFLOAD)) {
-                    EXPECT_GT(mt.stats.nbSpliced + mt.stats.nbFallbacks, 0u)
+                    EXPECT_GT(
+                            mt.stats.nbSpliced + mt.stats.nbChunks
+                                    + mt.stats.nbFallbacks,
+                            0u)
                             << toString(config);
                 }
                 if (nbWorkers <= 1) {
                     EXPECT_EQ(mt.stats.nbSpliced, 0u) << toString(config);
+                    EXPECT_EQ(mt.stats.nbChunks, 0u) << toString(config);
                 }
             }
         }
@@ -362,6 +367,60 @@ TEST_F(MTDeterminismTest, ReuseContext)
         }
     }
     ZL_CCtx_free(cctx);
+}
+
+TEST_F(MTDeterminismTest, SegmenterChunks)
+{
+    select(ZL_Compressor_buildSerialSegmenter(
+            compressor_, 100000, ZL_GRAPH_COMPRESS_GENERIC));
+    std::string const src = genData(1030000, 9);
+    Outcome const serial  = testAllConfigs(src, false, true);
+    EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+    EXPECT_EQ(serial.stats.nbChunks, 0u);
+
+    if (ZL_MULTITHREAD) {
+        Outcome const mt = compress(compressor_, src, { 4, 0, false });
+        EXPECT_GT(mt.stats.nbChunks, 1u);
+        EXPECT_EQ(mt.stats.nbFallbacks, 0u);
+    }
+}
+
+TEST_F(MTDeterminismTest, SegmenterChunksFanOut)
+{
+    // Worker contexts compressing a chunk fan out its successors
+    ZL_GraphID const head = split(
+            { 100000, 0 }, { ZL_GRAPH_COMPRESS_GENERIC, ZL_GRAPH_ZSTD });
+    select(ZL_Compressor_buildSerialSegmenter(compressor_, 300000, head));
+    std::string const src = genData(1200000, 10);
+    Outcome const serial  = testAllConfigs(src, false, true);
+    EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+}
+
+TEST_F(MTDeterminismTest, SegmenterChunksPermissiveFailures)
+{
+    // Chunks of odd sizes make le32FieldLz() fail
+    select(ZL_Compressor_buildSerialSegmenter(
+            compressor_, 100001, le32FieldLz()));
+    std::string const src = genData(400004, 11);
+    Outcome const serial  = testAllConfigs(src, true, true);
+    EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+    EXPECT_GE(serial.warnings.size(), 2u);
+}
+
+TEST_F(MTDeterminismTest, SegmenterChunksStrictFailure)
+{
+    select(ZL_Compressor_buildSerialSegmenter(
+            compressor_, 100001, le32FieldLz()));
+    std::string const src = genData(400004, 12);
+    Outcome const serial  = testAllConfigs(src, false, true);
+    EXPECT_NE(serial.errorCode, ZL_ErrorCode_no_error);
+
+    // The failing chunk is compressed again serially
+    Outcome const mt = compress(
+            compressor_,
+            src,
+            { 4, CCTX_MT_FORCE_OFFLOAD | CCTX_MT_SYNCHRONOUS, false });
+    EXPECT_GT(mt.stats.nbFallbacks, 0u);
 }
 
 TEST(MTParametersTest, Validation)

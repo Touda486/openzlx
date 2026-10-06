@@ -106,7 +106,13 @@ ZL_Report SEGM_runSegmenter(ZL_Segmenter* segCtx)
     ZL_ASSERT_NN(segCtx);
     ZL_SegmenterFn const segfn = segCtx->segDesc->segmenterFn;
     ZL_ASSERT_NN(segfn);
-    ZL_ERR_IF_ERR(segfn(segCtx), "Segmenter function failed");
+    ZL_Report const segReport = segfn(segCtx);
+    if (ZL_isError(segReport)) {
+        CCTX_abortChunks(segCtx->cctx);
+    }
+    ZL_ERR_IF_ERR(segReport, "Segmenter function failed");
+    // Write the chunks still compressed by worker contexts
+    ZL_ERR_IF_ERR(CCTX_waitChunks(segCtx->cctx, 0));
 
     // Check post-conditions
     ZL_ERR_IF_EQ(
@@ -301,16 +307,26 @@ ZL_Report ZL_Segmenter_processChunk(
     ZL_ERR_IF_NE(
             numInputs, ZL_Segmenter_numInputs(segCtx), graph_invalidNumInputs);
 
+    // Chunks without runtime parameters may be compressed by worker contexts,
+    // in which case their inputs must outlive this call
+    size_t const window   = CCTX_chunkWindow(cctx);
+    int const mayOffload  = (rGraphParams == NULL) && window > 0;
+    Arena* const inputArena =
+            mayOffload ? segCtx->sessionArena : segCtx->chunkArena;
+    if (mayOffload) {
+        // Make room for this chunk
+        ZL_ERR_IF_ERR(CCTX_waitChunks(cctx, window - 1));
+    }
+
     // Define Graph's inputs as a slice of Session's inputs
-    ALLOC_ARENA_MALLOC_CHECKED(
-            ZL_Data*, chunkInputs, numInputs, segCtx->chunkArena);
+    ALLOC_ARENA_MALLOC_CHECKED(ZL_Data*, chunkInputs, numInputs, inputArena);
     for (size_t n = 0; n < numInputs; n++) {
         ZL_ERR_IF_GT(
                 numElts[n],
                 ZL_Data_numElts(segCtx->inputs[n]),
                 parameter_invalid);
         chunkInputs[n] = STREAM_createInArena(
-                segCtx->chunkArena, (ZL_DataID){ (ZL_IDType)n });
+                inputArena, (ZL_DataID){ (ZL_IDType)n });
         ZL_ERR_IF_NULL(chunkInputs[n], allocation);
         ZL_ERR_IF_ERR(STREAM_refStreamSliceWithoutRefCount(
                 chunkInputs[n],
@@ -319,6 +335,22 @@ ZL_Report ZL_Segmenter_processChunk(
                 numElts[n]));
         segCtx->consumed[n] += numElts[n];
     }
+
+    if (mayOffload
+        && CCTX_submitChunk(
+                cctx,
+                chunkInputs,
+                numInputs,
+                startingGraphID,
+                rGraphParams,
+                CCTX_getSegmenterDepth(cctx) + 1)) {
+        segCtx->numChunks++;
+        CWAYPOINT(
+                on_ZL_Segmenter_processChunk_end, segCtx, ZL_returnSuccess());
+        return ZL_returnSuccess();
+    }
+    // Serial compression: write pending chunks first
+    ZL_ERR_IF_ERR(CCTX_waitChunks(cctx, 0));
 
     ALLOC_ARENA_MALLOC_CHECKED(
             RTStreamID, rtsids, numInputs, segCtx->chunkArena);

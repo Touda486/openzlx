@@ -177,6 +177,13 @@ struct ZL_CCtx_s {
     ZL_DataArenaType dataArenaType;        // forwarded to worker contexts
     unsigned mtTestingFlags;               // CCTX_MT_* flags
     CCTX_MTStats mtStats;                  // current compression
+    /* Chunks compressed by worker contexts, see CCTX_submitChunk() */
+    struct CCTX_ChunkTask_s* chunkTasks; // owned; ring buffer
+    size_t chunkTasksCapacity;
+    size_t firstChunkTask;
+    size_t nbChunkTasks;
+    void* chunkDst; // owned; where a worker context writes its chunk
+    size_t chunkDstCapacity;
     bool isWorkerChild;  // compresses a single successor for a parent context
     bool fanOutDisabled; // never compress successors in parallel
 };
@@ -257,6 +264,8 @@ void CCTX_free(ZL_CCtx* cctx)
         CCTX_free(VECTOR_AT(cctx->idleChildren, n));
     }
     VECTOR_DESTROY(cctx->idleChildren);
+    ZL_free(cctx->chunkTasks);
+    ZL_free(cctx->chunkDst);
     TRS_destroy(&cctx->cachedCodecStates);
     CodecCache_free(cctx->tryGraphCodecOutputCache);
     ZL_Compressor_free(cctx->internal_cgraph);
@@ -1602,6 +1611,30 @@ static void CCTX_releaseChild(ZL_CCtx* cctx, ZL_CCtx* child)
     }
 }
 
+/* Gives @child the parameters and session state of @cctx.
+ * Invoked by the calling thread. */
+static void CCTX_setupChild(ZL_CCtx* cctx, ZL_CCtx* child)
+{
+    ZL_OC_startOperation(&child->opCtx, ZL_Operation_compress);
+    child->cgraph = cctx->cgraph;
+    // requested parameters are used by nested tryGraph contexts
+    GCParams_copy(&child->requestedGCParams, &cctx->requestedGCParams);
+    GCParams_copy(&child->appliedGCParams, &cctx->appliedGCParams);
+    child->sharedPool     = CCTX_threadPool(cctx);
+    child->mtTestingFlags = cctx->mtTestingFlags;
+    child->mtStats        = (CCTX_MTStats){ 0 };
+    child->attachedCodecOutputCache         = NULL;
+    child->tryGraphCodecOutputCacheMaxBytes = cctx->tryGraphCodecOutputCacheMaxBytes;
+    CCTX_setTryGraphCacheStatsEnabled(
+            child, cctx->tryGraphCodecOutputCacheStatsEnabled);
+    child->tryGraphCodecOutputCacheActive = false;
+    child->inputs                         = NULL;
+    child->nbInputs                       = cctx->nbInputs;
+    child->numSegments                    = cctx->numSegments;
+    child->segmenterDepth                 = cctx->segmenterDepth;
+    child->inBackupMode                   = 0;
+}
+
 /* Runs on a worker thread, or on the calling thread */
 static void CCTX_runSubtreeJob(void* opaque)
 {
@@ -1627,25 +1660,7 @@ static ZL_Report CCTX_prepareSubtree(
     ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
     ZL_CCtx* const child = CCTX_acquireChild(cctx);
     ZL_ERR_IF_NULL(child, allocation);
-
-    ZL_OC_startOperation(&child->opCtx, ZL_Operation_compress);
-    child->cgraph = cctx->cgraph;
-    // requested parameters are used by nested tryGraph contexts
-    GCParams_copy(&child->requestedGCParams, &cctx->requestedGCParams);
-    GCParams_copy(&child->appliedGCParams, &cctx->appliedGCParams);
-    child->sharedPool     = CCTX_threadPool(cctx);
-    child->mtTestingFlags = cctx->mtTestingFlags;
-    child->mtStats        = (CCTX_MTStats){ 0 };
-    child->attachedCodecOutputCache         = NULL;
-    child->tryGraphCodecOutputCacheMaxBytes = cctx->tryGraphCodecOutputCacheMaxBytes;
-    CCTX_setTryGraphCacheStatsEnabled(
-            child, cctx->tryGraphCodecOutputCacheStatsEnabled);
-    child->tryGraphCodecOutputCacheActive = false;
-    child->inputs                         = NULL;
-    child->nbInputs                       = cctx->nbInputs;
-    child->numSegments                    = cctx->numSegments;
-    child->segmenterDepth                 = cctx->segmenterDepth;
-    child->inBackupMode                   = 0;
+    CCTX_setupChild(cctx, child);
 
     RTStreamID* const childInputs = ALLOC_Arena_malloc(
             child->sessionArena, si->nbInputs * sizeof(RTStreamID));
@@ -1981,6 +1996,314 @@ static int CCTX_runSuccessorsMT(
     ZL_free(tasks);
     *result = r;
     return 1;
+}
+
+/* ==========================================================
+ * Parallel compression of chunks
+ * ==========================================================
+ * Chunks produced by a segmenter are independent: each one is compressed
+ * by its own graph, then written into the frame with CCTX_flushChunk().
+ * CCTX_submitChunk() lets a worker context (child CCtx) compress a chunk and
+ * write it into its own buffer, while the segmenter moves on to the next one.
+ * Chunks are then appended to the frame in submission order, so the frame is
+ * identical to serial compression, whatever the number of threads.
+ *
+ * Rules:
+ * - Chunk inputs are slices of the session inputs, which remain valid and
+ *   unmodified for the whole compression.
+ * - Only chunks without runtime graph parameters are offloaded: their
+ *   lifetime is bounded by ZL_Segmenter_processChunk().
+ * - If a worker fails, the chunk is compressed again, serially, in the
+ *   parent context. Errors and warnings are therefore those of serial
+ *   compression.
+ */
+
+typedef struct CCTX_ChunkTask_s {
+    ZL_PoolJob job;
+    ZL_CCtx* child;
+    ZL_GraphID graphID;
+    ZL_Data** inputs; // slices of session inputs, owned by the parent
+    RTStreamID* childInputs;
+    size_t nbInputs;
+    unsigned depth;
+    ZL_Report result; // size of the chunk written into child->chunkDst
+} CCTX_ChunkTask;
+
+/* Runs on a worker thread, or on the calling thread */
+static void CCTX_runChunkJob(void* opaque)
+{
+    CCTX_ChunkTask* const task = (CCTX_ChunkTask*)opaque;
+    ZL_CCtx* const child       = task->child;
+    task->result               = CCTX_runSuccessor(
+            child,
+            task->graphID,
+            NULL,
+            task->childInputs,
+            task->nbInputs,
+            task->depth);
+    if (!ZL_isError(task->result)) {
+        task->result = CCTX_flushChunk(
+                child, (void*)task->inputs, task->nbInputs);
+    }
+}
+
+static int CCTX_chunksMTEligible(
+        const ZL_CCtx* cctx,
+        ZL_Data* const inputs[],
+        size_t nbInputs,
+        const ZL_RuntimeGraphParameters* rgp)
+{
+    if (cctx->appliedGCParams.nbWorkers <= 1 || cctx->isWorkerChild
+        || rgp != NULL) {
+        return 0;
+    }
+    if (!ZL_MULTITHREAD && !(cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS)) {
+        return 0;
+    }
+    if (cctx->fanOutDisabled || cctx->inBackupMode
+        || cctx->opCtx.hasCompressionHooks
+        || CCTX_getCodecOutputCache(cctx) != NULL) {
+        return 0;
+    }
+    // Older formats checksum the whole frame
+    if (CCTX_getAppliedGParam(cctx, ZL_CParam_formatVersion)
+        < ZL_CHUNK_VERSION_MIN) {
+        return 0;
+    }
+    if (!(cctx->mtTestingFlags & CCTX_MT_FORCE_OFFLOAD)) {
+        size_t chunkSize = 0;
+        for (size_t n = 0; n < nbInputs; n++) {
+            chunkSize += ZL_Data_contentSize(inputs[n]);
+        }
+        if (chunkSize < (size_t)cctx->appliedGCParams.mtMinTaskSize) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Compresses the chunk of @task again, in @cctx, exactly like serial
+ * compression does (see ZL_Segmenter_processChunk()). */
+static ZL_Report CCTX_compressChunkSerially(
+        ZL_CCtx* cctx,
+        const CCTX_ChunkTask* task)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(cctx);
+    RTGM_reset(&cctx->rtgraph);
+    ALLOC_ARENA_MALLOC_CHECKED(
+            RTStreamID, rtsids, task->nbInputs, cctx->chunkArena);
+    for (size_t n = 0; n < task->nbInputs; n++) {
+        ZL_TRY_LET(
+                RTStreamID,
+                rtsid,
+                RTGM_refInput(&cctx->rtgraph, task->inputs[n]));
+        rtsids[n] = rtsid;
+    }
+    ZL_Report r = CCTX_runSuccessor(
+            cctx, task->graphID, NULL, rtsids, task->nbInputs, task->depth);
+    if (!ZL_isError(r)) {
+        r = CCTX_flushChunk(cctx, (void*)task->inputs, task->nbInputs);
+    }
+    CCTX_cleanChunk(cctx);
+    return r;
+}
+
+/* Appends the oldest pending chunk to the frame */
+static ZL_Report CCTX_finishOldestChunk(ZL_CCtx* cctx)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(cctx);
+    ZL_ASSERT_GT(cctx->nbChunkTasks, 0);
+    CCTX_ChunkTask* const task = cctx->chunkTasks + cctx->firstChunkTask;
+    cctx->firstChunkTask = (cctx->firstChunkTask + 1) % cctx->chunkTasksCapacity;
+    cctx->nbChunkTasks--;
+
+    if (cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS) {
+        CCTX_runChunkJob(task);
+    } else {
+        ZL_ThreadPool_waitOrRun(cctx->pool, &task->job);
+    }
+    ZL_CCtx* const child = task->child;
+    ZL_Report r          = task->result;
+    if (!ZL_isError(r)) {
+        size_t const chunkSize = ZL_validResult(r);
+        ZL_ASSERT_LE(cctx->currentFrameSize, cctx->dstCapacity);
+        if (chunkSize <= cctx->dstCapacity - cctx->currentFrameSize) {
+            memcpy((char*)cctx->dstBuffer + cctx->currentFrameSize,
+                   child->chunkDst,
+                   chunkSize);
+            cctx->currentFrameSize += chunkSize;
+            ++cctx->numSegments;
+            ZL_OC_adoptErrorsAndWarnings(&cctx->opCtx, &child->opCtx);
+            cctx->mtStats.nbChunks++;
+            cctx->mtStats.nbSpliced += child->mtStats.nbSpliced;
+            cctx->mtStats.nbFallbacks += child->mtStats.nbFallbacks;
+        } else {
+            r = ZL_REPORT_ERROR(dstCapacity_tooSmall);
+        }
+    }
+    CCTX_releaseChild(cctx, child);
+    if (ZL_isError(r)) {
+        ZL_DLOG(BLOCK,
+                "CCTX_finishOldestChunk: offloaded chunk failed, compressing "
+                "it again serially");
+        cctx->mtStats.nbFallbacks++;
+        r = CCTX_compressChunkSerially(cctx, task);
+    }
+    for (size_t n = 0; n < task->nbInputs; n++) {
+        STREAM_free(task->inputs[n]);
+    }
+    ZL_ERR_IF_ERR(r);
+    return ZL_returnSuccess();
+}
+
+ZL_Report CCTX_waitChunks(ZL_CCtx* cctx, size_t maxPending)
+{
+    while (cctx->nbChunkTasks > maxPending) {
+        ZL_Report const r = CCTX_finishOldestChunk(cctx);
+        if (ZL_isError(r)) {
+            CCTX_abortChunks(cctx);
+            return r;
+        }
+    }
+    return ZL_returnSuccess();
+}
+
+void CCTX_abortChunks(ZL_CCtx* cctx)
+{
+    while (cctx->nbChunkTasks > 0) {
+        CCTX_ChunkTask* const task = cctx->chunkTasks + cctx->firstChunkTask;
+        cctx->firstChunkTask =
+                (cctx->firstChunkTask + 1) % cctx->chunkTasksCapacity;
+        cctx->nbChunkTasks--;
+        if (!(cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS)
+            && !ZL_ThreadPool_cancel(cctx->pool, &task->job)) {
+            ZL_ThreadPool_waitOrRun(cctx->pool, &task->job);
+        }
+        CCTX_releaseChild(cctx, task->child);
+        for (size_t n = 0; n < task->nbInputs; n++) {
+            STREAM_free(task->inputs[n]);
+        }
+    }
+}
+
+/* Prepares @child to compress a chunk.
+ * Invoked by the calling thread. */
+static ZL_Report CCTX_prepareChunk(
+        ZL_CCtx* cctx,
+        CCTX_ChunkTask* task,
+        ZL_CCtx* child,
+        ZL_Data* inputs[],
+        size_t nbInputs,
+        ZL_GraphID graphID,
+        unsigned depth)
+{
+    // Errors here only disable the offload: don't report them in @cctx
+    ZL_RESULT_DECLARE_SCOPE_REPORT(NULL);
+    CCTX_setupChild(cctx, child);
+    // Chunk headers describe the session inputs (read-only)
+    child->inputs    = cctx->inputs;
+    size_t inputSize = 0;
+    for (size_t n = 0; n < nbInputs; n++) {
+        inputSize += ZL_Data_contentSize(inputs[n]);
+        if (ZL_Data_type(inputs[n]) == ZL_Type_string) {
+            inputSize += ZL_Data_numElts(inputs[n]) * sizeof(uint32_t);
+        }
+    }
+    // Room for the chunk, stored if needed, and its checksums
+    size_t const dstCapacity = ZL_compressBound(inputSize);
+    if (child->chunkDstCapacity < dstCapacity) {
+        ZL_free(child->chunkDst);
+        child->chunkDstCapacity = 0;
+        child->chunkDst         = ZL_malloc(dstCapacity);
+        ZL_ERR_IF_NULL(child->chunkDst, allocation);
+        child->chunkDstCapacity = dstCapacity;
+    }
+    CCTX_setDst(child, child->chunkDst, child->chunkDstCapacity, 0);
+
+    RTStreamID* const childInputs = ALLOC_Arena_malloc(
+            child->sessionArena, nbInputs * sizeof(RTStreamID));
+    ZL_ERR_IF_NULL(childInputs, allocation);
+    for (size_t n = 0; n < nbInputs; n++) {
+        ZL_TRY_LET(
+                RTStreamID, rtsid, RTGM_refInput(&child->rtgraph, inputs[n]));
+        childInputs[n] = rtsid;
+    }
+
+    task->job         = (ZL_PoolJob){ .fn = CCTX_runChunkJob, .opaque = task };
+    task->child       = child;
+    task->graphID     = graphID;
+    task->inputs      = inputs;
+    task->childInputs = childInputs;
+    task->nbInputs    = nbInputs;
+    task->depth       = depth;
+    task->result      = ZL_returnSuccess();
+    return ZL_returnSuccess();
+}
+
+int CCTX_submitChunk(
+        ZL_CCtx* cctx,
+        ZL_Data* inputs[],
+        size_t nbInputs,
+        ZL_GraphID graphID,
+        const ZL_RuntimeGraphParameters* rgp,
+        unsigned depth)
+{
+    if (!CCTX_chunksMTEligible(cctx, inputs, nbInputs, rgp)) {
+        return 0;
+    }
+    int const synchronous = (cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS) != 0;
+    unsigned const nbWorkers = (unsigned)cctx->appliedGCParams.nbWorkers;
+    if (!synchronous
+        && ZL_isError(CCTX_ensureThreadPool(cctx, nbWorkers - 1))) {
+        return 0;
+    }
+    // Bound the number of chunks held in memory at the same time
+    size_t const window = CCTX_chunkWindow(cctx);
+    if (cctx->chunkTasksCapacity < window) {
+        ZL_ASSERT_EQ(cctx->nbChunkTasks, 0);
+        CCTX_ChunkTask* const tasks =
+                ZL_calloc(window * sizeof(CCTX_ChunkTask));
+        if (tasks == NULL) {
+            return 0;
+        }
+        ZL_free(cctx->chunkTasks);
+        cctx->chunkTasks         = tasks;
+        cctx->chunkTasksCapacity = window;
+        cctx->firstChunkTask     = 0;
+    }
+    if (cctx->nbChunkTasks >= window) {
+        // The caller waits for older chunks first
+        return 0;
+    }
+    ZL_CCtx* const child = CCTX_acquireChild(cctx);
+    if (child == NULL) {
+        return 0;
+    }
+    CCTX_ChunkTask* const task = cctx->chunkTasks
+            + (cctx->firstChunkTask + cctx->nbChunkTasks)
+                    % cctx->chunkTasksCapacity;
+    if (ZL_isError(CCTX_prepareChunk(
+                cctx, task, child, inputs, nbInputs, graphID, depth))) {
+        CCTX_releaseChild(cctx, child);
+        return 0;
+    }
+    cctx->nbChunkTasks++;
+    if (!synchronous) {
+        ZL_ThreadPool_submit(cctx->pool, &task->job);
+    }
+    return 1;
+}
+
+size_t CCTX_chunkWindow(const ZL_CCtx* cctx)
+{
+    int const nbWorkers = cctx->appliedGCParams.nbWorkers;
+    if (nbWorkers <= 1 || cctx->isWorkerChild) {
+        return 0;
+    }
+    if (cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS) {
+        return 1;
+    }
+    return (size_t)nbWorkers;
 }
 
 /* Expectation :
