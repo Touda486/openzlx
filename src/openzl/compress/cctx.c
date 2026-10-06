@@ -39,6 +39,8 @@
 #include "openzl/zl_opaque_types.h"
 #include "openzl/zl_reflection.h"
 
+#define CCTX_TRYGRAPH_CACHE_AUTO ((size_t)-1)
+
 // --------------------------
 // Transform's private header
 // --------------------------
@@ -142,7 +144,9 @@ struct ZL_CCtx_s {
     CachedStates cachedCodecStates; // @note valid for single-thread only
     ZL_CodecOutputCache* attachedCodecOutputCache; // borrowed
     ZL_CodecOutputCache* tryGraphCodecOutputCache; // owned; lazily allocated
-    size_t tryGraphCodecOutputCacheMaxBytes; // 0 disables automatic caching
+    // 0 disables automatic caching; CCTX_TRYGRAPH_CACHE_AUTO enables it only
+    // when the serial backend search is on (see CCTX_tryGraphCacheBudget())
+    size_t tryGraphCodecOutputCacheMaxBytes;
     bool tryGraphCodecOutputCacheActive;
     bool tryGraphCodecOutputCacheStatsEnabled;
     GCParams requestedGCParams; // User selection, at CCtx level
@@ -196,7 +200,7 @@ static ZL_Report CCTX_init(ZL_CCtx* cctx)
     ZL_ERR_IF_ERR(RTGM_init(&cctx->rtgraph));
     TRS_init(&cctx->cachedCodecStates);
     CCTX_TransformHeaders_init(&cctx->trHeaders);
-    cctx->tryGraphCodecOutputCacheMaxBytes = 0;
+    cctx->tryGraphCodecOutputCacheMaxBytes = CCTX_TRYGRAPH_CACHE_AUTO;
     VECTOR_INIT(cctx->idleChildren, 1 << 16);
     cctx->dataArenaType = ZL_DataArenaType_heap;
 
@@ -546,18 +550,32 @@ ZL_Report ZL_CCtx_setCodecOutputCache(ZL_CCtx* cctx, ZL_CodecOutputCache* cache)
     return ZL_returnSuccess();
 }
 
+/* The serial backend search tries several backends on the same stream, then
+ * runs the winner again: caching the trials turns that second run into a
+ * replay. So by default, the cache is enabled whenever the search is. */
+static size_t CCTX_tryGraphCacheBudget(const ZL_CCtx* cctx)
+{
+    if (cctx->tryGraphCodecOutputCacheMaxBytes != CCTX_TRYGRAPH_CACHE_AUTO) {
+        return cctx->tryGraphCodecOutputCacheMaxBytes;
+    }
+    if (CCTX_getAppliedGParam(cctx, ZL_CParam_serialBackendSearch) == 0) {
+        return 0;
+    }
+    return CodecCache_getDefaultMaxBytes();
+}
+
 static ZL_CodecOutputCache* CCTX_enableTryGraphCodecOutputCache(ZL_CCtx* cctx)
 {
     ZL_ASSERT_NN(cctx);
     if (cctx->attachedCodecOutputCache != NULL) {
         return cctx->attachedCodecOutputCache;
     }
-    if (cctx->tryGraphCodecOutputCacheMaxBytes == 0) {
+    const size_t budget = CCTX_tryGraphCacheBudget(cctx);
+    if (budget == 0) {
         return NULL;
     }
     if (cctx->tryGraphCodecOutputCache == NULL) {
-        cctx->tryGraphCodecOutputCache =
-                CodecCache_create(cctx->tryGraphCodecOutputCacheMaxBytes);
+        cctx->tryGraphCodecOutputCache = CodecCache_create(budget);
         if (cctx->tryGraphCodecOutputCache != NULL) {
             CodecCache_setStatsEnabled(
                     cctx->tryGraphCodecOutputCache,

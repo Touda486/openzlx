@@ -388,6 +388,46 @@ TEST_F(BruteForceSelectorTest, testAutomaticCacheBudgetControlsCaching)
     }
 }
 
+TEST_F(BruteForceSelectorTest, testSerialBackendSearchEnablesCacheByDefault)
+{
+    std::string data;
+    for (uint32_t i = 0; data.size() < 200000; ++i) {
+        data += "line " + std::to_string(i % 977) + " of the backend search\n";
+    }
+    std::unique_ptr<ZL_TypedRef, decltype(&ZL_TypedRef_free)> input(
+            ZL_TypedRef_createSerial(data.data(), data.size()),
+            &ZL_TypedRef_free);
+    ASSERT_NE(input, nullptr);
+    ZL_REQUIRE_SUCCESS(ZL_Compressor_selectStartingGraphID(
+            cgraph_, ZL_GRAPH_COMPRESS_GENERIC));
+    const size_t capacity = ZL_compressBound(data.size());
+
+    auto compress = [&](std::string& out) {
+        ZL_REQUIRE_SUCCESS(ZL_CCtx_setParameter(
+                cctx_, ZL_CParam_formatVersion, ZL_MAX_FORMAT_VERSION));
+        ZL_REQUIRE_SUCCESS(ZL_CCtx_setParameter(
+                cctx_,
+                ZL_CParam_serialBackendSearch,
+                ZL_SerialBackendSearch_zstd | ZL_SerialBackendSearch_bzip3));
+        ZL_REQUIRE_SUCCESS(ZL_CCtx_refCompressor(cctx_, cgraph_));
+        out.assign(capacity, '\0');
+        const ZL_Report r = ZL_CCtx_compressTypedRef(
+                cctx_, out.data(), out.size(), input.get());
+        ZL_REQUIRE_SUCCESS(r);
+        out.resize(ZL_validResult(r));
+    };
+
+    std::string cached;
+    compress(cached);
+    EXPECT_GT(lastChunkTryGraphCacheStats().hits, 0);
+
+    ZL_REQUIRE_SUCCESS(ZL_CCtx_setTryGraphCacheBudget(cctx_, 0));
+    std::string uncached;
+    compress(uncached);
+    EXPECT_EQ(lastChunkTryGraphCacheStats().hits, 0);
+    EXPECT_EQ(cached, uncached);
+}
+
 TEST_F(BruteForceSelectorTest, testAutomaticCacheDisablePreservesAttachedCache)
 {
     auto dataVec = generateNumeric(0);
