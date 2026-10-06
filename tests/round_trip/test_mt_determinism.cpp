@@ -569,6 +569,22 @@ TEST_F(MTDeterminismTest, ParallelChunkDecoding)
     }
 }
 
+TEST_F(MTDeterminismTest, ParallelChunkDecodingReferencedOutput)
+{
+    // The last decoder of each chunk references its input as output
+    select(ZL_Compressor_buildSerialSegmenter(
+            compressor_, 100000, le32FieldLz()));
+    std::string const src = genData(400000, 17);
+    Outcome const serial  = compress(compressor_, src, { 0, 0, false });
+    ASSERT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+    for (int nbWorkers : { 0, 2, 8 }) {
+        auto const [code, dst] =
+                decompress(serial.frame, src.size(), nbWorkers);
+        EXPECT_EQ(code, ZL_ErrorCode_no_error) << nbWorkers;
+        EXPECT_TRUE(dst == src) << nbWorkers;
+    }
+}
+
 TEST(MTParametersTest, Validation)
 {
     ZL_CCtx* const cctx = ZL_CCtx_create();

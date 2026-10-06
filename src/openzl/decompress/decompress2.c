@@ -2030,13 +2030,19 @@ static ZL_Report addChunksIntoFinalStreams(ZL_DCtx* dctx)
 
         /* special case: output buffer not yet allocated
          * this can only happen for older frame version < ZL_CHUNK_VERSION_MIN
-         * and for String type, since we have the size for other types */
+         * and for String type, since we have the size for other types,
+         * or for the output of a chunk context, see decompressChunksMT() */
         if (!STREAM_hasBuffer(output)) {
-            ZL_ASSERT_EQ(type, ZL_Type_string);
-            ZL_ASSERT_LT(dctx->dfh.formatVersion, ZL_CHUNK_VERSION_MIN);
-            // @note (@cyan): works fine, because there is only one Chunk
-            ZL_ERR_IF_ERR(STREAM_copyStringStream(output, chunkOutput));
-            continue;
+            if (type != ZL_Type_string) {
+                ZL_ASSERT_NN(dctx->sharedPool, "only for chunk contexts");
+                ZL_ERR_IF_ERR(
+                        STREAM_reserve(output, type, eltWidth, numElts));
+            } else {
+                ZL_ASSERT_LT(dctx->dfh.formatVersion, ZL_CHUNK_VERSION_MIN);
+                // @note (@cyan): works fine, because there is only one Chunk
+                ZL_ERR_IF_ERR(STREAM_copyStringStream(output, chunkOutput));
+                continue;
+            }
         }
 
         // All output buffers are expected to be pre-allocated and correctly
@@ -2537,8 +2543,17 @@ static ZL_Report DCTX_decompressChunksMT(
                 stop = true;
                 break;
             }
-            ZL_ThreadPool_submit(DCTX_threadPool(dctx), &task->job);
             nextOffset += task->chunkSize;
+            if (nextOffset == *consumed + task->chunkSize
+                && frameSize > nextOffset
+                && ZL_read8((const char*)framePtr + nextOffset) == 0) {
+                // A single chunk: the caller decodes it directly
+                DCTX_releaseChild(dctx, task->child);
+                STREAM_free(task->output);
+                stop = true;
+                break;
+            }
+            ZL_ThreadPool_submit(DCTX_threadPool(dctx), &task->job);
             nbInFlight++;
         }
         if (nbInFlight == 0) {
