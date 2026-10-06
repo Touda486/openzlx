@@ -185,5 +185,15 @@ std::vector<CandidateSelection> filterParetoFrontier(
         std::vector<CandidateSelection>&& candidates,
         ThreadPool& threadPool);
 
+/**
+ * @returns the index of the candidate of @p selections which decompresses the
+ * fastest, among those at most @p tolerancePct percent larger than the
+ * smallest one. @p selections must be sorted by increasing compressed size,
+ * and non empty.
+ */
+size_t selectFastestDecompressionWithinSize(
+        poly::span<const CandidateSelection> selections,
+        float tolerancePct);
+
 } // namespace training
 } // namespace openzl

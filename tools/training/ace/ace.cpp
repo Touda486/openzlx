@@ -388,7 +388,9 @@ std::vector<SerializedCompressorInternal> ACETrainer::train(
                         backendGraph,
                         ace,
                         trainParams.saveAceState ? aceState : nullptr,
-                        trainParams.paretoFrontier));
+                        trainParams.paretoFrontier
+                                || trainParams.aceSizeTolerancePct
+                                           .has_value()));
     }
 
     checkPoint_.emplace(
@@ -396,7 +398,24 @@ std::vector<SerializedCompressorInternal> ACETrainer::train(
 
     MergedParetoFrontier frontier(
             makeCompressor, std::move(candidates), inputs, trainParams);
-    return frontier.paretoFrontier();
+    auto compressors = frontier.paretoFrontier();
+    if (trainParams.aceSizeTolerancePct.has_value()
+        && !trainParams.paretoFrontier) {
+        // Candidates are sorted by increasing compressed size
+        const size_t selected = selectFastestDecompressionWithinSize(
+                frontier.selections(), *trainParams.aceSizeTolerancePct);
+        const auto& result = frontier.selections()[selected].result();
+        Logger::log_c(
+                INFO,
+                "ACE: selected candidate %zu / %zu: ratio %.3f (smallest: %.3f), decompression %.1f MB/s on the training samples",
+                selected + 1,
+                frontier.selections().size(),
+                result.compressionRatio(),
+                frontier.selections()[0].result().compressionRatio(),
+                result.decompressionSpeedMBps());
+        std::swap(compressors[0], compressors[selected]);
+    }
+    return compressors;
 }
 
 } // namespace openzl::training

@@ -346,5 +346,25 @@ std::vector<CandidateSelection> combineCandidates(
     return currentFrontier;
 }
 
+size_t selectFastestDecompressionWithinSize(
+        poly::span<const CandidateSelection> selections,
+        float tolerancePct)
+{
+    const double maxSize = (double)selections[0].result().compressedSize
+            * (1.0 + tolerancePct / 100.0);
+    size_t fastest = 0;
+    for (size_t i = 1; i < selections.size(); ++i) {
+        const auto& result = selections[i].result();
+        if ((double)result.compressedSize > maxSize) {
+            break;
+        }
+        if (result.decompressionTime
+            < selections[fastest].result().decompressionTime) {
+            fastest = i;
+        }
+    }
+    return fastest;
+}
+
 } // namespace training
 } // namespace openzl

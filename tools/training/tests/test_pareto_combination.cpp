@@ -459,6 +459,21 @@ TEST_F(MergedParetoFrontierTest, UnmutatedWhenThereAreNoCandidates)
                     data));
 }
 
+TEST_F(ParetoCombinationTest, SelectFastestDecompressionWithinSize)
+{
+    // Sorted by compressed size
+    const auto selections = getCandidates(
+            "graph",
+            { { 1000, 1, 900 },
+              { 1040, 1, 500 },
+              { 1050, 1, 700 },
+              { 1100, 1, 100 } });
+    EXPECT_EQ(selectFastestDecompressionWithinSize(selections, 0), 0u);
+    EXPECT_EQ(selectFastestDecompressionWithinSize(selections, 3), 0u);
+    EXPECT_EQ(selectFastestDecompressionWithinSize(selections, 5), 1u);
+    EXPECT_EQ(selectFastestDecompressionWithinSize(selections, 10), 3u);
+}
+
 } // namespace tests
 } // namespace training
 } // namespace openzl

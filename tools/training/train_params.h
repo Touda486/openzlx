@@ -39,6 +39,11 @@ struct TrainParams {
     bool saveAceState{ false };
     /// Experimental: let ACE also pick the deflate, lzma2 and bzip3 backends.
     bool aceExtraBackends{ false };
+    /// When set, ACE selects the compressor which decompresses the fastest
+    /// among those at most this percentage larger than the smallest one, on
+    /// the training samples, instead of the smallest one. Ignored with
+    /// paretoFrontier, which returns all candidates.
+    poly::optional<float> aceSizeTolerancePct;
     /// Existing bundle required by compressors supplied to the trainer.
     std::shared_ptr<const std::string> dictBundleData;
     /// Prune down to to this number of candidates.

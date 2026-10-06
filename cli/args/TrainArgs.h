@@ -93,6 +93,12 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
                 "Experimental: let ACE also pick the deflate, lzma2 and bzip3 backends. Slower training and compression.");
         parser.addCommandFlag(
                 cmd(),
+                kAceSizeTolerance,
+                0,
+                true,
+                "Trade compression ratio for decompression speed: select the trained compressor which decompresses the fastest among those at most this percentage larger than the smallest one (e.g. 5), instead of the smallest one.");
+        parser.addCommandFlag(
+                cmd(),
                 kNoClustering,
                 0,
                 false,
@@ -259,6 +265,14 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
                 parsed.cmdHasFlag(cmd(), kNoAceSuccessors);
         trainParams.aceExtraBackends =
                 parsed.cmdHasFlag(cmd(), kAceExtraBackends);
+        auto sizeTolerance = parsed.cmdFlag(cmd(), kAceSizeTolerance);
+        if (sizeTolerance) {
+            trainParams.aceSizeTolerancePct = std::stof(sizeTolerance.value());
+            if (!(*trainParams.aceSizeTolerancePct >= 0)) {
+                throw InvalidArgsException(
+                        "--ace-size-tolerance must be non-negative");
+            }
+        }
 
         trainParams.noClustering = parsed.cmdHasFlag(cmd(), kNoClustering);
         trainParams.saveAceState = parsed.cmdHasFlag(cmd(), kSaveAceState);
@@ -324,6 +338,7 @@ class TrainArgs : public GlobalArgs, public ProfileArgs {
     inline static const std::string kUseAllSamples    = "use-all-samples";
     inline static const std::string kNoAceSuccessors  = "no-ace-successors";
     inline static const std::string kAceExtraBackends = "ace-extra-backends";
+    inline static const std::string kAceSizeTolerance = "ace-size-tolerance";
     inline static const std::string kNoClustering     = "no-clustering";
     inline static const std::string kMaxTimeSecs      = "max-time-secs";
     inline static const std::string kMaxFileSizeMb    = "max-file-size-mb";
