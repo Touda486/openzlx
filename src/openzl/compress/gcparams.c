@@ -28,6 +28,7 @@ const GCParams GCParams_default = {
     .storeOnExpansion   = ZL_TernaryParam_enable,
     .minStreamSize      = ZL_MINSTREAMSIZE_DEFAULT,
     .serialBackendSearch = 0,
+    .serialBackendSearchSampleSize = ZL_SERIALBACKENDSEARCH_SAMPLESIZE_DEFAULT,
 };
 
 typedef struct {
@@ -60,6 +61,8 @@ const GCParamToName GCParams_kAllParams[] = {
     { ZL_CParam_minStreamSize, { (const char*[]){ "minStreamSize" }, 1 } },
     { ZL_CParam_serialBackendSearch,
       { (const char*[]){ "serialBackendSearch" }, 1 } },
+    { ZL_CParam_serialBackendSearchSampleSize,
+      { (const char*[]){ "serialBackendSearchSampleSize" }, 1 } },
     { ZL_CParam_nbWorkers, { (const char*[]){ "nbWorkers" }, 1 } },
     { ZL_CParam_mtMinTaskSize, { (const char*[]){ "mtMinTaskSize" }, 1 } }
 };
@@ -126,6 +129,9 @@ GCParams_setParameter(GCParams* gcparams, ZL_CParam paramId, int value)
             ZL_ERR_IF_LT(value, 0, parameter_invalid);
             ZL_ERR_IF_GT(value, ZL_SerialBackendSearch_all, parameter_invalid);
             gcparams->serialBackendSearch = (unsigned)value;
+            break;
+        case ZL_CParam_serialBackendSearchSampleSize:
+            gcparams->serialBackendSearchSampleSize = value;
             break;
         case ZL_CParam_nbWorkers:
             ZL_ERR_IF(
@@ -195,6 +201,7 @@ void GCParams_applyDefaults(GCParams* dst, const GCParams* defaults)
     SET_DEFAULT(dst, defaults, storeOnExpansion);
     SET_DEFAULT(dst, defaults, minStreamSize);
     SET_DEFAULT(dst, defaults, serialBackendSearch);
+    SET_DEFAULT(dst, defaults, serialBackendSearchSampleSize);
 }
 #undef SET_DEFAULT
 
@@ -247,6 +254,8 @@ int GCParams_getParameter(const GCParams* gcparams, ZL_CParam paramId)
             return (int)gcparams->minStreamSize;
         case ZL_CParam_serialBackendSearch:
             return (int)gcparams->serialBackendSearch;
+        case ZL_CParam_serialBackendSearchSampleSize:
+            return gcparams->serialBackendSearchSampleSize;
         case ZL_CParam_nbWorkers:
             return gcparams->nbWorkers;
         case ZL_CParam_mtMinTaskSize:

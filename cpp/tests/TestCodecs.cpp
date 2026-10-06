@@ -154,6 +154,35 @@ TEST_F(TestCodecs, serialBackendSearch)
     EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, -1));
 }
 
+TEST_F(TestCodecs, serialBackendSearchSampling)
+{
+    // Large enough for the backends to be ranked on small samples first
+    std::string data;
+    for (int i = 0; data.size() < (1 << 20); ++i) {
+        data += "record " + std::to_string((i * 7919) % 100003) + ";"
+                + std::to_string(i % 97) + "\n";
+    }
+    auto compressedSize = [&](int sampleSize) {
+        Compressor compressor;
+        compressor.setParameter(CParam::FormatVersion, ZL_MAX_FORMAT_VERSION);
+        compressor.setParameter(
+                CParam::SerialBackendSearch, ZL_SerialBackendSearch_all);
+        compressor.setParameter(
+                CParam::SerialBackendSearchSampleSize, sampleSize);
+        compressor.selectStartingGraph(ZL_GRAPH_COMPRESS_GENERIC);
+        return testRoundTrip(compressor, Input::refSerial(data)).size();
+    };
+    // Without sampling, the smallest result is kept
+    const size_t exact = compressedSize(-1);
+    for (int sampleSize : { 64 << 10, 256 << 10 }) {
+        const size_t sampled = compressedSize(sampleSize);
+        EXPECT_GE(sampled, exact) << "sampleSize=" << sampleSize;
+        EXPECT_LE(sampled, exact + exact / 50) << "sampleSize=" << sampleSize;
+    }
+    // The default sample is larger than half the input: it isn't used
+    EXPECT_EQ(compressedSize(0), exact);
+}
+
 TEST_F(TestCodecs, lzParameters)
 {
     const auto muxLengthsGraph =

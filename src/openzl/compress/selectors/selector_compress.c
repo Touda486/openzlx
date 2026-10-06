@@ -1,6 +1,9 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
 #include "openzl/compress/selectors/selector_compress.h"
+
+#include <string.h> // memcpy
+
 #include "openzl/common/assertion.h"
 #include "openzl/codecs/zl_bzip3.h"
 #include "openzl/codecs/zl_deflate.h"
@@ -62,6 +65,71 @@ ZL_GraphID SI_selector_compress(
     return graph;
 }
 
+/* The backend search is costly: each candidate compresses the entire input.
+ * For large inputs, candidates are first ranked on a sample, made of evenly
+ * spaced slices of the input, and only the ones close to the best one are
+ * tried on the entire input. */
+#define SERIAL_SEARCH_SAMPLE_SLICES 8
+// Candidates whose sample is at most this much larger than the best one
+// are tried on the entire input
+#define SERIAL_SEARCH_MARGIN_PCT 1
+
+/* @returns the number of candidates kept in @candidates, in their original
+ * order, or @nbCandidates when sampling isn't possible. */
+static size_t SI_preselectOnSample(
+        const ZL_Selector* selCtx,
+        const ZL_Input* input,
+        ZL_GraphID candidates[],
+        size_t nbCandidates,
+        size_t sampleSize)
+{
+    size_t const srcSize   = ZL_Input_contentSize(input);
+    size_t const sliceSize = sampleSize / SERIAL_SEARCH_SAMPLE_SLICES;
+    sampleSize             = sliceSize * SERIAL_SEARCH_SAMPLE_SLICES;
+    if (sliceSize == 0 || srcSize / 2 < sampleSize) {
+        return nbCandidates;
+    }
+    char* const sample = ZL_Selector_getScratchSpace(selCtx, sampleSize);
+    if (sample == NULL) {
+        return nbCandidates;
+    }
+    const char* const src = (const char*)ZL_Input_ptr(input);
+    size_t const stride =
+            (srcSize - sliceSize) / (SERIAL_SEARCH_SAMPLE_SLICES - 1);
+    for (size_t n = 0; n < SERIAL_SEARCH_SAMPLE_SLICES; n++) {
+        memcpy(sample + n * sliceSize, src + n * stride, sliceSize);
+    }
+    ZL_TypedRef* const ref = ZL_TypedRef_createSerial(sample, sampleSize);
+    if (ref == NULL) {
+        return nbCandidates;
+    }
+    size_t sizes[4];
+    size_t best = (size_t)-1;
+    ZL_ASSERT_LE(nbCandidates, 4);
+    for (size_t n = 0; n < nbCandidates; n++) {
+        ZL_GraphReport const gr =
+                ZL_Selector_tryGraph(selCtx, ref, candidates[n]);
+        sizes[n] = ZL_isError(gr.finalCompressedSize)
+                ? (size_t)-1
+                : ZL_validResult(gr.finalCompressedSize);
+        if (sizes[n] < best) {
+            best = sizes[n];
+        }
+    }
+    ZL_TypedRef_free(ref);
+    if (best == (size_t)-1) {
+        return nbCandidates;
+    }
+    size_t const limit = best + best * SERIAL_SEARCH_MARGIN_PCT / 100;
+    size_t nbKept      = 0;
+    for (size_t n = 0; n < nbCandidates; n++) {
+        if (sizes[n] <= limit) {
+            candidates[nbKept++] = candidates[n];
+        }
+    }
+    return nbKept;
+}
+
 ZL_GraphID SI_selector_compress_serial(
         const ZL_Selector* selCtx,
         const ZL_Input* inputStream,
@@ -97,6 +165,16 @@ ZL_GraphID SI_selector_compress_serial(
             && ZL_Selector_isNodeSupported(
                     selCtx, ZL_MAKE_NODE_ID(ZL_PrivateStandardNodeID_bzip3))) {
             candidates[nbCandidates++] = ZL_GRAPH_BZIP3;
+        }
+        const int sampleSize = ZL_Selector_getCParam(
+                selCtx, ZL_CParam_serialBackendSearchSampleSize);
+        if (nbCandidates > 1 && sampleSize > 0) {
+            nbCandidates = SI_preselectOnSample(
+                    selCtx,
+                    inputStream,
+                    candidates,
+                    nbCandidates,
+                    (size_t)sampleSize);
         }
         if (nbCandidates == 1) {
             return candidates[0];

@@ -79,6 +79,11 @@ std::unique_ptr<Compressor> createCompressorFromArgs(
                 CParam::SerialBackendSearch,
                 profileArgs.serialBackendSearch().value());
     }
+    if (profileArgs.serialBackendSearchSampleSize()) {
+        compressor->setParameter(
+                CParam::SerialBackendSearchSampleSize,
+                profileArgs.serialBackendSearchSampleSize().value());
+    }
     return compressor;
 }
 } // namespace cli

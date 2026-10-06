@@ -97,6 +97,8 @@ void registerCParam(nb::module_& m)
             .value("ContentChecksum", CParam::ContentChecksum)
             .value("MinStreamSize", CParam::MinStreamSize)
             .value("SerialBackendSearch", CParam::SerialBackendSearch)
+            .value("SerialBackendSearchSampleSize",
+                   CParam::SerialBackendSearchSampleSize)
             .value("NbWorkers", CParam::NbWorkers)
             .value("MtMinTaskSize", CParam::MtMinTaskSize);
 }

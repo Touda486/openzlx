@@ -199,6 +199,16 @@ typedef enum {
     /// @default 0 means ZL_MTMINTASKSIZE_DEFAULT.
     ZL_CParam_mtMinTaskSize = 15,
 
+    /// Experimental: for serial streams larger than twice this size, the
+    /// backend search (ZL_CParam_serialBackendSearch) first ranks the
+    /// candidates on a sample of this size, made of evenly spaced slices of
+    /// the stream. Only the best candidates are then tried on the entire
+    /// stream, and when a single one remains, it is used directly.
+    /// A negative value disables sampling: all candidates are tried on the
+    /// entire stream.
+    /// @default 0 means ZL_SERIALBACKENDSEARCH_SAMPLESIZE_DEFAULT.
+    ZL_CParam_serialBackendSearchSampleSize = 16,
+
     // Other possible parameters (ideas) :
     //  - Backup when a node errors out (continue with generic LZ, or error
     //  out)
@@ -222,6 +232,7 @@ typedef enum {
 #define ZL_SerialBackendSearch_lzma2 4
 #define ZL_SerialBackendSearch_bzip3 8
 #define ZL_SerialBackendSearch_all 15
+#define ZL_SERIALBACKENDSEARCH_SAMPLESIZE_DEFAULT (1 << 20)
 
 /**
  * @brief Sets a global compression parameter via the CCtx.

@@ -53,6 +53,11 @@ void ProfileArgs::addArgs(arg::ArgParser& parser)
             0,
             true,
             "Experimental: bitmask of the backends that the generic serial compressor tries, keeping the smallest result (1=zstd, 2=deflate, 4=lzma2, 8=bzip3, 15=all). A single backend is used directly. Default: 0, always zstd.");
+    parser.addGlobalFlag(
+            kSerialBackendSearchSampleSize,
+            0,
+            true,
+            "Experimental: size in bytes of the sample on which --serial-backend-search ranks the backends of large streams, before trying the best ones on the entire stream. Negative: try all backends on the entire stream. Default: 1 MiB.");
 }
 
 ProfileArgs::ProfileArgs(const arg::ParsedArgs& parsed)
@@ -67,6 +72,11 @@ ProfileArgs::ProfileArgs(const arg::ParsedArgs& parsed)
     if (serialBackendSearch.has_value()) {
         serialBackendSearch_ =
                 util::checkedstoiExact(serialBackendSearch.value());
+    }
+    auto sampleSize = parsed.globalFlag(kSerialBackendSearchSampleSize);
+    if (sampleSize.has_value()) {
+        serialBackendSearchSampleSize_ =
+                util::checkedstoiExact(sampleSize.value());
     }
     auto profileArg = parsed.globalFlag(kProfileArg);
     if (profileArg) {

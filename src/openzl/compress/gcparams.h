@@ -79,6 +79,11 @@ typedef struct {
     /// 0 (default): serial streams always go to zstd
     unsigned serialBackendSearch;
 
+    /// Experimental: sample size used by the serial backend search to rank
+    /// candidates on large streams. Negative: no sampling.
+    /// 0 (default): ZL_SERIALBACKENDSEARCH_SAMPLESIZE_DEFAULT
+    int serialBackendSearchSampleSize;
+
     /// Preserve parameters across compression sessions (CCtx level only)
     /// 0 (default): Reset parameters after each session
     /// 1: Keep parameters sticky across sessions
