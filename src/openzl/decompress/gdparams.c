@@ -3,6 +3,7 @@
 #include "openzl/decompress/gdparams.h" // GDParams
 #include "openzl/common/assertion.h"
 #include "openzl/shared/mem.h"
+#include "openzl/zl_compress.h"   // ZL_NBWORKERS_MAX
 #include "openzl/zl_decompress.h" // ZL_DParam
 
 // All defaults for Global parameters
@@ -30,6 +31,15 @@ GDParams_setParameter(GDParams* gdparams, ZL_DParam paramId, int value)
             break;
         case ZL_DParam_enableCodecFusion:
             gdparams->enableCodecFusion = (ZL_TernaryParam)value;
+            break;
+        case ZL_DParam_nbWorkers:
+            ZL_ERR_IF(
+                    value < 0 || value > ZL_NBWORKERS_MAX,
+                    compressionParameter_invalid,
+                    "nbWorkers must be within [0, %d]: %d",
+                    ZL_NBWORKERS_MAX,
+                    value);
+            gdparams->nbWorkers = value;
             break;
         default:
             ZL_ERR(compressionParameter_invalid);
@@ -68,6 +78,8 @@ int GDParams_getParameter(const GDParams* gdparams, ZL_DParam paramId)
             return (int)gdparams->checkContentChecksum;
         case ZL_DParam_enableCodecFusion:
             return (int)gdparams->enableCodecFusion;
+        case ZL_DParam_nbWorkers:
+            return gdparams->nbWorkers;
         default:
             return 0;
     }

@@ -11,6 +11,7 @@
 #include "openzl/common/logging.h"
 #include "openzl/common/operation_context.h"
 #include "openzl/common/stream.h" // ZL_Data
+#include "openzl/common/threading.h" // ZL_ThreadPool, ZL_Mutex
 #include "openzl/common/vector.h"
 #include "openzl/common/wire_format.h"            // TransformType_e
 #include "openzl/decompress/dctx2.h"              // DCTX_* declarations
@@ -93,6 +94,14 @@ struct ZL_DCtx_s {
     GDParams appliedGDParams;    // Used at decompression time; DCtx > default
     ZL_DictLoader* dictLoader;   // Referenced, not owned
     const ZL_DictBundle* bundle; // Current frame's resolved bundle, or NULL
+    /* Multi-threading, see runLeafDecodersMT() and decompressChunksMT() */
+    ZL_ThreadPool* pool;       // owned; lazily created
+    ZL_ThreadPool* sharedPool; // borrowed from the parent, for chunk contexts
+    ZL_DCtx** idleChildren;    // owned; reusable chunk contexts
+    size_t nbIdleChildren;
+    ZL_Mutex streamMutex; // serializes stream creation while decoders run
+                          // in parallel
+    bool parallelDecoders;
 }; // typedef'd to ZL_DCtx within zs2_decompress.h
 
 // --------------------------
@@ -107,6 +116,11 @@ ZL_DCtx* ZL_DCtx_create(void)
 
     ZL_OC_init(&dctx->opCtx);
     ZL_OC_startOperation(&dctx->opCtx, ZL_Operation_decompress);
+    if (ZL_Mutex_init(&dctx->streamMutex) != 0) {
+        ZL_OC_destroy(&dctx->opCtx);
+        ZL_free(dctx);
+        return NULL;
+    }
 
     dctx->chunkArena = ALLOC_StackArena_create();
     if (!dctx->chunkArena) {
@@ -183,6 +197,12 @@ void ZL_DCtx_free(ZL_DCtx* dctx)
 {
     if (dctx == NULL)
         return;
+    // No job can be in flight at this point
+    ZL_ThreadPool_free(dctx->pool);
+    for (size_t n = 0; n < dctx->nbIdleChildren; n++) {
+        ZL_DCtx_free(dctx->idleChildren[n]);
+    }
+    ZL_free(dctx->idleChildren);
     DCTX_freeStreams(dctx);
     DTM_destroy(&dctx->dtm);
     ZL_DecoderFusionState_destroy(&dctx->fusion);
@@ -192,6 +212,7 @@ void ZL_DCtx_free(ZL_DCtx* dctx)
     ALLOC_Arena_freeArena(dctx->streamArena);
     ALLOC_Arena_freeArena(dctx->chunkArena);
     ZL_OC_destroy(&dctx->opCtx);
+    ZL_Mutex_destroy(&dctx->streamMutex);
     ZL_free(dctx);
 }
 
@@ -979,7 +1000,7 @@ static ZL_Report decodeFrameHeader(
 // Processing streams
 // -------------------------------------------
 
-ZL_Data* DCTX_newStream(
+static ZL_Data* DCTX_newStream_locked(
         ZL_DCtx* dctx,
         ZL_IDType streamID,
         ZL_Type stype,
@@ -1101,6 +1122,24 @@ _newStream:
     return info->data;
 }
 
+ZL_Data* DCTX_newStream(
+        ZL_DCtx* dctx,
+        ZL_IDType streamID,
+        ZL_Type stype,
+        size_t eltWidth,
+        size_t eltsCapacity)
+{
+    if (!dctx->parallelDecoders) {
+        return DCTX_newStream_locked(
+                dctx, streamID, stype, eltWidth, eltsCapacity);
+    }
+    ZL_Mutex_lock(&dctx->streamMutex);
+    ZL_Data* const data = DCTX_newStream_locked(
+            dctx, streamID, stype, eltWidth, eltsCapacity);
+    ZL_Mutex_unlock(&dctx->streamMutex);
+    return data;
+}
+
 /* for streams whose content is stored in the frame */
 ZL_Data* DCTX_newStreamFromConstRef(
         ZL_DCtx* dctx,
@@ -1134,7 +1173,7 @@ ZL_Data* DCTX_newStreamFromConstRef(
     return info->data;
 }
 
-ZL_Data* DCTX_newStreamFromStreamRef(
+static ZL_Data* DCTX_newStreamFromStreamRef_locked(
         ZL_DCtx* dctx,
         ZL_IDType streamID,
         ZL_Type st,
@@ -1168,6 +1207,26 @@ ZL_Data* DCTX_newStreamFromStreamRef(
     }
 
     return info->data;
+}
+
+ZL_Data* DCTX_newStreamFromStreamRef(
+        ZL_DCtx* dctx,
+        ZL_IDType streamID,
+        ZL_Type st,
+        size_t eltWidth,
+        size_t numElts,
+        const ZL_Data* ref,
+        size_t offsetBytes)
+{
+    if (dctx->parallelDecoders) {
+        ZL_Mutex_lock(&dctx->streamMutex);
+    }
+    ZL_Data* const data = DCTX_newStreamFromStreamRef_locked(
+            dctx, streamID, st, eltWidth, numElts, ref, offsetBytes);
+    if (dctx->parallelDecoders) {
+        ZL_Mutex_unlock(&dctx->streamMutex);
+    }
+    return data;
 }
 
 static const ZL_Data** DCTX_getNodeInputs(
@@ -1632,12 +1691,249 @@ ZL_Report DCTX_runDecoder(
     return ZL_returnValue(nbInStreams);
 }
 
+/* ==========================================================
+ * Parallel decoding of independent streams
+ * ==========================================================
+ * Decoders whose inputs are all stored in the frame don't depend on any other
+ * decoder. When they are general purpose backends, which are slow, they are
+ * run ahead of time, in parallel, before the serial decoding loop, which
+ * then skips them.
+ *
+ * Rules:
+ * - Only decoders regenerating a single intermediate stream are eligible:
+ *   final streams and the append-to-output optimization share buffers.
+ * - Each decoder gets its own workspace, codec state, and operation context.
+ *   Stream creation, which updates shared DCtx state, is serialized.
+ * - If a decoder fails, its output is discarded, and it runs again in the
+ *   serial loop, so errors are those of serial decoding.
+ */
+
+/* @returns the thread pool for nbWorkers, or NULL if it can't be created.
+ * Chunk contexts use the pool of their parent. */
+static ZL_ThreadPool* DCTX_threadPool(ZL_DCtx* dctx)
+{
+    if (dctx->sharedPool != NULL) {
+        return dctx->sharedPool;
+    }
+    int const nbWorkers = DCtx_getAppliedGParam(dctx, ZL_DParam_nbWorkers);
+    if (nbWorkers <= 1) {
+        return NULL;
+    }
+    if (ZL_ThreadPool_nbThreads(dctx->pool) != (unsigned)nbWorkers - 1) {
+        ZL_ThreadPool_free(dctx->pool);
+        dctx->pool = ZL_ThreadPool_create((unsigned)nbWorkers - 1);
+    }
+    return dctx->pool;
+}
+
+typedef struct {
+    ZL_PoolJob job;
+    ZL_DCtx* dctx;
+    const DFH_NodeInfo* nodeInfo;
+    const DTransform* dt;
+    const ZL_Data** inputs;
+    const ZL_IDType* regensID;
+    ZL_RBuffer thContent;
+    Arena* wksp;
+    void* state;
+    ZL_OperationContext opCtx;
+    ZL_Report report;
+} DCTX_DecoderTask;
+
+static bool DCTX_isParallelDecoder(
+        const ZL_DCtx* dctx,
+        const DFH_NodeInfo* nodeInfo)
+{
+    if (nodeInfo->fusion != NULL || nodeInfo->nbRegens != 1
+        || nodeInfo->dictIdx != ZL_DICT_INDEX_NONE
+        || nodeInfo->trpid.trt != trt_standard) {
+        return false;
+    }
+    switch (nodeInfo->trpid.trid) {
+        case ZL_StandardTransformID_zstd:
+        case ZL_StandardTransformID_deflate:
+        case ZL_StandardTransformID_lzma2:
+        case ZL_StandardTransformID_bzip3:
+            break;
+        default:
+            return false;
+    }
+    size_t const totalNbStreams = dctx->dataInfo.size;
+    size_t const regenIdx       = nodeInfo->inputStreamBaseIdx
+            + nodeInfo->numInputStreams + nodeInfo->regenDistances[0];
+    if (regenIdx >= totalNbStreams - dctx->nbOutputs
+        || dctx->dataInfo.ptr[regenIdx].appendOpt != NULL) {
+        return false;
+    }
+    // Even small streams are worth it: these backends have a high fixed cost
+    for (size_t n = 0; n < nodeInfo->numInputStreams; n++) {
+        const ZL_DCtx_DataInfo* const info =
+                &dctx->dataInfo.ptr[nodeInfo->inputStreamBaseIdx + n];
+        if (info->producerNodeIdx != ZL_PRODUCER_STORE || info->data == NULL) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Runs on a worker thread, or on the calling thread */
+static void DCTX_runDecoderJob(void* opaque)
+{
+    DCTX_DecoderTask* const task = (DCTX_DecoderTask*)opaque;
+    struct ZL_Decoder_s diState  = {
+         .dctx           = task->dctx,
+         .dt             = task->dt,
+         .statePtr       = &task->state,
+         .workspaceArena = task->wksp,
+         .regensID       = task->regensID,
+         .nbRegens       = 1,
+         .thContent      = task->thContent,
+         .ddict          = NULL,
+         .opCtx          = &task->opCtx,
+    };
+    task->report = task->dt->transformFn(
+            &diState,
+            task->dt,
+            task->inputs,
+            task->nodeInfo->numInputStreams);
+}
+
+/* Prepares @task on the calling thread.
+ * @returns false if the decoder must run serially */
+static bool DCTX_prepareDecoderTask(
+        ZL_DCtx* dctx,
+        DCTX_DecoderTask* task,
+        const DFH_NodeInfo* nodeInfo)
+{
+    ZL_RESULT_OF(DTrPtr)
+    const dt = DTM_getTransform(
+            &dctx->dtm, nodeInfo->trpid, dctx->dfh.formatVersion);
+    if (ZL_RES_isError(dt)) {
+        return false;
+    }
+    task->wksp = ALLOC_StackArena_create();
+    if (task->wksp == NULL) {
+        return false;
+    }
+    ZL_OC_init(&task->opCtx);
+    ZL_OC_startOperation(&task->opCtx, ZL_Operation_decompress);
+    task->job      = (ZL_PoolJob){ .fn = DCTX_runDecoderJob, .opaque = task };
+    task->dctx     = dctx;
+    task->nodeInfo = nodeInfo;
+    task->dt       = ZL_RES_value(dt);
+    task->state    = NULL;
+    task->inputs   = DCTX_getNodeInputs(dctx, nodeInfo, task->wksp);
+    task->regensID = DCTX_getRegeneratedStreamIDs(dctx, nodeInfo, task->wksp);
+    ZL_RESULT_OF(ZL_RBuffer)
+    const th = ZL_RBuffer_slice(
+            dctx->thstream, nodeInfo->trhStart, nodeInfo->trhSize);
+    if (task->inputs == NULL || task->regensID == NULL || ZL_RES_isError(th)
+        || ZL_isError(DCTX_validateNodeInputs(
+                dctx,
+                task->dt,
+                nodeInfo,
+                task->inputs,
+                nodeInfo->numInputStreams,
+                /* allowNullInputs */ false))) {
+        ZL_OC_destroy(&task->opCtx);
+        ALLOC_Arena_freeArena(task->wksp);
+        return false;
+    }
+    task->thContent = ZL_RES_value(th);
+    return true;
+}
+
+/* Releases @task, and @returns true if its decoder succeeded */
+static bool DCTX_finishDecoderTask(ZL_DCtx* dctx, DCTX_DecoderTask* task)
+{
+    bool success = !ZL_isError(task->report)
+            && !ZL_isError(DCTX_validateNodeOutputs(dctx, task->regensID, 1));
+    ZL_DCtx_DataInfo* const regen = &dctx->dataInfo.ptr[task->regensID[0]];
+    if (success) {
+        ZL_OC_adoptErrorsAndWarnings(&dctx->opCtx, &task->opCtx);
+        DCTX_freeDecoderInputStreams(dctx, task->nodeInfo);
+    } else {
+        // Discard the output, the decoder will run again serially
+        STREAM_free(regen->data);
+        regen->data = NULL;
+    }
+    if (task->state != NULL) {
+        const ZL_CodecStateManager* const tsm =
+                DT_getTransformStateMgr(task->dt);
+        ZL_ASSERT_NN(tsm);
+        tsm->stateFree(task->state);
+    }
+    ZL_OC_destroy(&task->opCtx);
+    ALLOC_Arena_freeArena(task->wksp);
+    return success;
+}
+
+/* Runs eligible decoders in parallel. @done[n] is set when node n ran. */
+static void runLeafDecodersMT(ZL_DCtx* dctx, bool* done)
+{
+    int const nbWorkers = DCtx_getAppliedGParam(dctx, ZL_DParam_nbWorkers);
+    size_t const nbNodes = dctx->dfh.nbDTransforms;
+    if (!ZL_MULTITHREAD || nbWorkers <= 1 || dctx->preserveStreams
+        || dctx->opCtx.hasDecompressionHooks) {
+        return;
+    }
+    size_t nbEligible = 0;
+    for (size_t n = 0; n < nbNodes; n++) {
+        nbEligible += DCTX_isParallelDecoder(
+                dctx, &VECTOR_AT(dctx->dfh.nodes, n));
+    }
+    if (nbEligible < 2) {
+        return;
+    }
+    ZL_ThreadPool* const pool = DCTX_threadPool(dctx);
+    if (pool == NULL) {
+        return;
+    }
+    DCTX_DecoderTask* const tasks =
+            ZL_calloc(nbEligible * sizeof(DCTX_DecoderTask));
+    if (tasks == NULL) {
+        return;
+    }
+    size_t nbTasks = 0;
+    for (size_t n = 0; n < nbNodes; n++) {
+        const DFH_NodeInfo* const nodeInfo = &VECTOR_AT(dctx->dfh.nodes, n);
+        if (DCTX_isParallelDecoder(dctx, nodeInfo)
+            && DCTX_prepareDecoderTask(dctx, tasks + nbTasks, nodeInfo)) {
+            nbTasks++;
+        }
+    }
+    dctx->parallelDecoders = true;
+    for (size_t t = 0; t < nbTasks; t++) {
+        ZL_ThreadPool_submit(pool, &tasks[t].job);
+    }
+    for (size_t t = 0; t < nbTasks; t++) {
+        ZL_ThreadPool_waitOrRun(pool, &tasks[t].job);
+    }
+    dctx->parallelDecoders = false;
+    for (size_t t = 0; t < nbTasks; t++) {
+        const size_t nodeIdx =
+                (size_t)(tasks[t].nodeInfo - VECTOR_DATA(dctx->dfh.nodes));
+        done[nodeIdx] = DCTX_finishDecoderTask(dctx, tasks + t);
+    }
+    ZL_free(tasks);
+}
+
 static ZL_Report runDecoders(ZL_DCtx* dctx)
 {
     ZL_RESULT_DECLARE_SCOPE_REPORT(dctx);
     ZL_DLOG(FRAME, "runDecoders (%zu stages)", dctx->dfh.nbDTransforms);
     ZL_ASSERT_NN(dctx);
+    bool* done = NULL;
+    if (DCtx_getAppliedGParam(dctx, ZL_DParam_nbWorkers) > 1) {
+        ALLOC_ARENA_CALLOC_CHECKED(
+                bool, doneArray, dctx->dfh.nbDTransforms + 1, dctx->chunkArena);
+        done = doneArray;
+        runLeafDecodersMT(dctx, done);
+    }
     for (size_t stage = 0; stage < dctx->dfh.nbDTransforms; stage++) {
+        if (done != NULL && done[stage]) {
+            continue;
+        }
         ZL_DLOG(BLOCK, "decoding stage %zu", stage);
         DFH_NodeInfo const* nodeInfo = &VECTOR_AT(dctx->dfh.nodes, stage);
         ZL_ERR_IF_ERR(DCTX_runDecoder(
@@ -1964,26 +2260,14 @@ ZL_Report DCTX_prepareFrameChunkFromHeader(
 /**
  * @return size of chunk, read from frame
  */
-static ZL_Report ZL_DCtx_decompressChunk(
+/* Decodes the chunk prepared by setupChunkDecode() into the outputs */
+static ZL_Report DCTX_decodePreparedChunk(
         ZL_DCtx* dctx,
         size_t nbOutputs,
-        const void* framePtr,
-        size_t frameSize,
-        size_t alreadyConsumed)
+        uint32_t expectedContentHash)
 {
     ZL_RESULT_DECLARE_SCOPE_REPORT(dctx);
-    ZL_Data** outputs            = dctx->outputs;
-    uint32_t expectedContentHash = 0;
-    ZL_TRY_LET(
-            DCTX_FrameChunkInfo,
-            chunkInfo,
-            setupChunkDecode(
-                    dctx,
-                    framePtr,
-                    frameSize,
-                    alreadyConsumed,
-                    &expectedContentHash));
-    size_t const chunkSize = chunkInfo.chunkSize;
+    ZL_Data** outputs = dctx->outputs;
 
     // start the decompression process.
     ZL_ERR_IF_ERR(runDecoders(dctx));
@@ -2035,8 +2319,252 @@ static ZL_Report ZL_DCtx_decompressChunk(
         (void)outputs;
 #endif
     }
+    return ZL_returnSuccess();
+}
 
-    return ZL_returnValue(chunkSize);
+static ZL_Report ZL_DCtx_decompressChunk(
+        ZL_DCtx* dctx,
+        size_t nbOutputs,
+        const void* framePtr,
+        size_t frameSize,
+        size_t alreadyConsumed)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(dctx);
+    uint32_t expectedContentHash = 0;
+    ZL_TRY_LET(
+            DCTX_FrameChunkInfo,
+            chunkInfo,
+            setupChunkDecode(
+                    dctx,
+                    framePtr,
+                    frameSize,
+                    alreadyConsumed,
+                    &expectedContentHash));
+    ZL_ERR_IF_ERR(
+            DCTX_decodePreparedChunk(dctx, nbOutputs, expectedContentHash));
+    return ZL_returnValue(chunkInfo.chunkSize);
+}
+
+/* ==========================================================
+ * Parallel decoding of chunks
+ * ==========================================================
+ * Chunks are independent: each one is decoded by a chunk context (child
+ * DCtx) into its own output, on the thread pool, then appended to the final
+ * output, in frame order. Locating a chunk only requires parsing its header,
+ * which is done by the calling thread. So the frame format doesn't change.
+ *
+ * Rules:
+ * - Only frames with a single serial output, and without custom decoders,
+ *   are decoded this way.
+ * - If a chunk context fails, the chunk is decoded again, serially, by the
+ *   parent context, so errors are those of serial decoding.
+ */
+
+typedef struct {
+    ZL_PoolJob job;
+    ZL_DCtx* child;
+    ZL_Data* output; // owned by the task
+    size_t offset;
+    size_t chunkSize;
+    uint32_t expectedContentHash;
+    ZL_Report result;
+} DCTX_ChunkTask;
+
+/* Runs on a worker thread, or on the calling thread */
+static void DCTX_runChunkJob(void* opaque)
+{
+    DCTX_ChunkTask* const task = (DCTX_ChunkTask*)opaque;
+    task->result               = DCTX_decodePreparedChunk(
+            task->child, 1, task->expectedContentHash);
+}
+
+static ZL_DCtx* DCTX_acquireChild(ZL_DCtx* dctx)
+{
+    ZL_DCtx* child = NULL;
+    if (dctx->nbIdleChildren > 0) {
+        child = dctx->idleChildren[--dctx->nbIdleChildren];
+    } else {
+        child = ZL_DCtx_create();
+        if (child == NULL) {
+            return NULL;
+        }
+    }
+    GDParams_copy(&child->requestedGDParams, &dctx->appliedGDParams);
+    child->sharedPool = DCTX_threadPool(dctx);
+    child->dictLoader = dctx->dictLoader;
+    if (child->sharedPool == NULL
+        || ZL_isError(DCTX_initFromFrameInfo(child, dctx->dfh.frameinfo))) {
+        ZL_DCtx_free(child);
+        return NULL;
+    }
+    child->bundle = dctx->bundle;
+    return child;
+}
+
+static void DCTX_releaseChild(ZL_DCtx* dctx, ZL_DCtx* child)
+{
+    cleanAllBuffers(child);
+    child->outputs = NULL;
+    ZL_OC_clearErrors(&child->opCtx);
+    ZL_DCtx** const idle = ZL_realloc(
+            dctx->idleChildren, (dctx->nbIdleChildren + 1) * sizeof(*idle));
+    if (idle == NULL) {
+        ZL_DCtx_free(child);
+        return;
+    }
+    dctx->idleChildren                         = idle;
+    dctx->idleChildren[dctx->nbIdleChildren++] = child;
+}
+
+static bool DCTX_chunksMTEligible(const ZL_DCtx* dctx, size_t nbOutputs)
+{
+    if (!ZL_MULTITHREAD
+        || DCtx_getAppliedGParam(dctx, ZL_DParam_nbWorkers) <= 1
+        || dctx->sharedPool != NULL || dctx->preserveStreams
+        || dctx->opCtx.hasDecompressionHooks
+        || dctx->dfh.formatVersion < ZL_CHUNK_VERSION_MIN || nbOutputs != 1
+        || DTransformMap_size(&dctx->dtm.dtmap) != 0) {
+        return false;
+    }
+    ZL_RESULT_OF(size_t)
+    const type = ZL_FrameInfo_getOutputType(dctx->dfh.frameinfo, 0);
+    return !ZL_RES_isError(type) && ZL_RES_value(type) == ZL_Type_serial;
+}
+
+/* Prepares the chunk at @p offset in a chunk context.
+ * Invoked by the calling thread.
+ * @returns false if the chunk must be decoded serially */
+static bool DCTX_prepareChunkTask(
+        ZL_DCtx* dctx,
+        DCTX_ChunkTask* task,
+        const void* framePtr,
+        size_t frameSize,
+        size_t offset)
+{
+    ZL_DCtx* const child = DCTX_acquireChild(dctx);
+    if (child == NULL) {
+        return false;
+    }
+    task->output = STREAM_create((ZL_DataID){ 0 });
+    if (task->output == NULL) {
+        DCTX_releaseChild(dctx, child);
+        return false;
+    }
+    child->outputs = &task->output;
+    ZL_RESULT_OF(DCTX_FrameChunkInfo)
+    const chunkInfo = setupChunkDecode(
+            child, framePtr, frameSize, offset, &task->expectedContentHash);
+    if (ZL_RES_isError(chunkInfo)) {
+        DCTX_releaseChild(dctx, child);
+        STREAM_free(task->output);
+        return false;
+    }
+    task->job       = (ZL_PoolJob){ .fn = DCTX_runChunkJob, .opaque = task };
+    task->child     = child;
+    task->offset    = offset;
+    task->chunkSize = ZL_RES_value(chunkInfo).chunkSize;
+    task->result    = ZL_returnSuccess();
+    return true;
+}
+
+/* Appends the output of @p task to the final output, or decodes its chunk
+ * again, serially, if its chunk context failed. Releases @p task. */
+static ZL_Report DCTX_finishChunkTask(
+        ZL_DCtx* dctx,
+        DCTX_ChunkTask* task,
+        const void* framePtr,
+        size_t frameSize)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(dctx);
+    ZL_ThreadPool_waitOrRun(DCTX_threadPool(dctx), &task->job);
+    ZL_Data* const output = dctx->outputs[0];
+    bool success          = !ZL_isError(task->result)
+            && ZL_Data_contentSize(task->output) <= STREAM_byteCapacity(output)
+            && !ZL_isError(STREAM_append(output, task->output));
+    if (success) {
+        ZL_OC_adoptErrorsAndWarnings(&dctx->opCtx, &task->child->opCtx);
+    }
+    DCTX_releaseChild(dctx, task->child);
+    STREAM_free(task->output);
+    if (!success) {
+        ZL_TRY_LET(
+                size_t,
+                chunkSize,
+                ZL_DCtx_decompressChunk(
+                        dctx, 1, framePtr, frameSize, task->offset));
+        ZL_ERR_IF_NE(chunkSize, task->chunkSize, logicError);
+    }
+    return ZL_returnSuccess();
+}
+
+/* Decodes chunks in parallel, from @p *consumed, as long as possible.
+ * On return, @p *consumed is the position of the next chunk, or of the end
+ * of frame marker. The caller decodes the rest serially. */
+static ZL_Report DCTX_decompressChunksMT(
+        ZL_DCtx* dctx,
+        const void* framePtr,
+        size_t frameSize,
+        size_t* consumed)
+{
+    ZL_RESULT_DECLARE_SCOPE_REPORT(dctx);
+    if (!DCTX_chunksMTEligible(dctx, dctx->nbOutputs)) {
+        return ZL_returnSuccess();
+    }
+    // Bound the number of chunks held in memory at the same time
+    size_t const window =
+            (size_t)DCtx_getAppliedGParam(dctx, ZL_DParam_nbWorkers);
+    DCTX_ChunkTask* const tasks = ZL_calloc(window * sizeof(DCTX_ChunkTask));
+    if (tasks == NULL) {
+        return ZL_returnSuccess();
+    }
+    size_t first      = 0;
+    size_t nbInFlight = 0;
+    size_t nextOffset = *consumed;
+    bool stop         = false;
+    ZL_Report r       = ZL_returnSuccess();
+    while (!ZL_isError(r)) {
+        while (!stop && nbInFlight < window) {
+            // End of frame marker, or truncated frame: let the caller handle
+            if (frameSize < nextOffset + 1
+                || ZL_read8((const char*)framePtr + nextOffset) == 0) {
+                stop = true;
+                break;
+            }
+            DCTX_ChunkTask* const task =
+                    tasks + (first + nbInFlight) % window;
+            if (!DCTX_prepareChunkTask(
+                        dctx, task, framePtr, frameSize, nextOffset)) {
+                stop = true;
+                break;
+            }
+            ZL_ThreadPool_submit(DCTX_threadPool(dctx), &task->job);
+            nextOffset += task->chunkSize;
+            nbInFlight++;
+        }
+        if (nbInFlight == 0) {
+            break;
+        }
+        DCTX_ChunkTask* const task = tasks + first;
+        first                      = (first + 1) % window;
+        nbInFlight--;
+        r = DCTX_finishChunkTask(dctx, task, framePtr, frameSize);
+        if (!ZL_isError(r)) {
+            *consumed = task->offset + task->chunkSize;
+        }
+    }
+    // On error, discard the chunks still in flight
+    for (; nbInFlight > 0; nbInFlight--) {
+        DCTX_ChunkTask* const task = tasks + first;
+        first                      = (first + 1) % window;
+        if (!ZL_ThreadPool_cancel(DCTX_threadPool(dctx), &task->job)) {
+            ZL_ThreadPool_waitOrRun(DCTX_threadPool(dctx), &task->job);
+        }
+        DCTX_releaseChild(dctx, task->child);
+        STREAM_free(task->output);
+    }
+    ZL_free(tasks);
+    ZL_ERR_IF_ERR(r);
+    return ZL_returnSuccess();
 }
 
 ZL_Report ZL_DCtx_decompressMultiTBuffer(
@@ -2168,6 +2696,9 @@ ZL_Report ZL_DCtx_decompressMultiTBuffer(
                 break;
         }
     }
+
+    // decode as many chunks as possible in parallel, then the rest serially
+    ZL_ERR_IF_ERR(DCTX_decompressChunksMT(dctx, framePtr, frameSize, &consumed));
 
     // main decompression loop
     size_t chunkIndex = 0;

@@ -148,6 +148,21 @@ typedef enum {
      */
     ZL_DParam_enableCodecFusion = 4,
 
+    /**
+     * @brief Number of threads used to decode independent parts of a frame
+     * concurrently.
+     *
+     * When this parameter is > 1, N-1 background threads are used in
+     * addition to the calling thread to decode in parallel:
+     * - the chunks of frames with a single serial output,
+     * - the streams stored in a chunk which are decoded by a general purpose
+     *   backend (zstd, deflate, lzma2, bzip3).
+     * The decompressed output doesn't depend on this parameter.
+     * Ignored when the library is built without ZL_MULTITHREAD.
+     * @default 0 means serial decompression.
+     */
+    ZL_DParam_nbWorkers = 5,
+
 } ZL_DParam;
 
 /**

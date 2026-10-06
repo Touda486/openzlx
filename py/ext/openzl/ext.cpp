@@ -108,7 +108,9 @@ void registerDParam(nb::module_& m)
     nb::enum_<DParam>(m, "DParam")
             .value("StickyParameters", DParam::StickyParameters)
             .value("CheckCompressedChecksum", DParam::CheckCompressedChecksum)
-            .value("CheckContentChecksum", DParam::CheckContentChecksum);
+            .value("CheckContentChecksum", DParam::CheckContentChecksum)
+            .value("EnableCodecFusion", DParam::EnableCodecFusion)
+            .value("NbWorkers", DParam::NbWorkers);
 }
 
 template <typename... Args>

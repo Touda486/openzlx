@@ -112,6 +112,8 @@ BenchmarkResult runCompressionBenchmarks(const BenchmarkArgs& args)
             args.threads);
     std::optional<FatBundleDictLoader> fatBundleLoader;
     DCtx dctx;
+    dctx.setParameter(DParam::StickyParameters, 1);
+    dctx.setParameter(DParam::NbWorkers, args.threads);
 
     // Load dict bundle into DCtx if available
     if (!args.dictBundleData.empty()) {

@@ -88,6 +88,7 @@ int cmdDecompress(const DecompressArgs& args)
     const auto start = std::chrono::steady_clock::now();
 
     DCtx dctx;
+    dctx.setParameter(DParam::NbWorkers, args.threads);
 
     // If a fat dict bundle was provided, create a loader and attach it.
     std::unique_ptr<FatBundleDictLoader> fatBundleLoader = nullptr;

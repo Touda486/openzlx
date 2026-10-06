@@ -28,6 +28,8 @@ enum class DParam {
     StickyParameters        = ZL_DParam_stickyParameters,
     CheckCompressedChecksum = ZL_DParam_checkCompressedChecksum,
     CheckContentChecksum    = ZL_DParam_checkContentChecksum,
+    EnableCodecFusion       = ZL_DParam_enableCodecFusion,
+    NbWorkers               = ZL_DParam_nbWorkers,
 };
 
 class DCtx {

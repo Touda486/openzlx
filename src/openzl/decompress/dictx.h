@@ -49,6 +49,9 @@ struct ZL_Decoder_s {
     size_t nbRegens;
     ZL_RBuffer thContent;
     const void* ddict; // materialized dict object (NULL if none)
+    /// Where errors are reported. NULL means the one of @dctx.
+    /// Decoders running on worker threads have their own.
+    ZL_OperationContext* opCtx;
 }; // typedef'd to ZL_Decoder within "zs2_dtransform.h"
 
 ZL_Decoder* DI_createDICtx(ZL_DCtx* dctx);

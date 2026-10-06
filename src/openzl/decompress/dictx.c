@@ -180,6 +180,9 @@ ZL_OperationContext* ZL_Decoder_getOperationContext(ZL_Decoder* dictx)
     if (dictx == NULL) {
         return NULL;
     }
+    if (dictx->opCtx != NULL) {
+        return dictx->opCtx;
+    }
     return ZL_DCtx_getOperationContext(dictx->dctx);
 }
 

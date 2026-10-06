@@ -52,6 +52,13 @@ class DecompressArgs : GlobalArgs {
                 'D',
                 true,
                 "Path to a fat dict bundle (.zd) file to load for decompression.");
+        parser.addCommandFlag(
+                cmd(),
+                kThreads,
+                'T',
+                true,
+                "Number of threads used to decode independent streams "
+                "(e.g. columns) in parallel (default: 1).");
     }
 
     explicit DecompressArgs(const arg::ParsedArgs& parsed) : GlobalArgs(parsed)
@@ -83,6 +90,15 @@ class DecompressArgs : GlobalArgs {
         traceStreamsDir = parsed.cmdFlag(cmd(), kTraceStreamsDir);
         streamPreview   = !parsed.cmdHasFlag(cmd(), kNoStreamPreview);
         dictBundlePath  = parsed.cmdFlag(cmd(), kDictBundle);
+        if (parsed.cmdHasFlag(cmd(), kThreads)) {
+            threads = util::checkedstoiExact(
+                    parsed.cmdFlag(cmd(), kThreads).value());
+            if (threads < 1 || threads > ZL_NBWORKERS_MAX) {
+                throw InvalidArgsException(
+                        "--threads must be between 1 and "
+                        + std::to_string(ZL_NBWORKERS_MAX));
+            }
+        }
 
         if (!streamPreview && !traceOutput) {
             throw InvalidArgsException(
@@ -102,8 +118,10 @@ class DecompressArgs : GlobalArgs {
     std::optional<std::string> traceStreamsDir;
     bool streamPreview = true;
     std::optional<std::string> dictBundlePath;
+    int threads = 1;
 
    private:
+    inline static const std::string kThreads         = "threads";
     inline static const std::string kInput           = "input";
     inline static const std::string kOutput          = "output";
     inline static const std::string kForce           = "force";

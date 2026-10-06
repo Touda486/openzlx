@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <random>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -453,6 +454,118 @@ TEST_F(MTDeterminismTest, ParallelBruteForceTrials)
     for (size_t size : { 200000, 200001 }) {
         Outcome const serial = testAllConfigs(genData(size, 14), false, false);
         EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+    }
+}
+
+/// Decompresses @p frame with @p nbWorkers threads
+/// Without checksums, corruptions reach the decoders
+std::pair<ZL_ErrorCode, std::string> decompress(
+        const std::string& frame,
+        size_t dstSize,
+        int nbWorkers,
+        bool checksums = true)
+{
+    ZL_DCtx* const dctx = ZL_DCtx_create();
+    EXPECT_FALSE(ZL_isError(
+            ZL_DCtx_setParameter(dctx, ZL_DParam_nbWorkers, nbWorkers)));
+    if (!checksums) {
+        for (ZL_DParam p : { ZL_DParam_checkCompressedChecksum,
+                             ZL_DParam_checkContentChecksum }) {
+            EXPECT_FALSE(ZL_isError(ZL_DCtx_setParameter(
+                    dctx, p, ZL_TernaryParam_disable)));
+        }
+    }
+    std::string dst(dstSize, '\0');
+    ZL_Report const r = ZL_DCtx_decompress(
+            dctx, dst.data(), dst.size(), frame.data(), frame.size());
+    ZL_DCtx_free(dctx);
+    if (ZL_isError(r)) {
+        return { ZL_errorCode(r), "" };
+    }
+    dst.resize(ZL_validResult(r));
+    return { ZL_ErrorCode_no_error, dst };
+}
+
+TEST_F(MTDeterminismTest, ParallelDecoders)
+{
+    // Many independent streams decoded by general purpose backends
+    std::vector<size_t> sizes;
+    std::vector<ZL_GraphID> successors;
+    const ZL_GraphID backends[] = { ZL_GRAPH_ZSTD,
+                                    ZL_GRAPH_DEFLATE,
+                                    ZL_GRAPH_LZMA2,
+                                    ZL_GRAPH_BZIP3,
+                                    ZL_GRAPH_COMPRESS_GENERIC };
+    for (size_t n = 0; n < 30; n++) {
+        sizes.push_back(n % 6 == 0 ? 100 : 20000 + n * 1000);
+        successors.push_back(backends[n % 5]);
+    }
+    sizes.back() = 0;
+    select(split(sizes, successors));
+    std::string const src = genData(1000000, 15);
+    Outcome const serial  = compress(compressor_, src, { 0, 0, false });
+    ASSERT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+
+    for (int nbWorkers : { 0, 1, 2, 4, 8 }) {
+        auto const [code, dst] =
+                decompress(serial.frame, src.size(), nbWorkers);
+        EXPECT_EQ(code, ZL_ErrorCode_no_error) << nbWorkers;
+        EXPECT_TRUE(dst == src) << nbWorkers;
+    }
+
+    // Corrupted frames fail the same way, whatever the number of threads
+    for (size_t pos = serial.frame.size() / 4; pos < serial.frame.size();
+         pos += serial.frame.size() / 29) {
+        std::string corrupted = serial.frame;
+        corrupted[pos] ^= 0x5A;
+        auto const expected = decompress(corrupted, src.size(), 0, false);
+        for (int nbWorkers : { 2, 8 }) {
+            auto const actual =
+                    decompress(corrupted, src.size(), nbWorkers, false);
+            EXPECT_EQ(actual.first, expected.first) << pos;
+            EXPECT_TRUE(actual.second == expected.second) << pos;
+        }
+    }
+}
+
+TEST_F(MTDeterminismTest, ParallelChunkDecoding)
+{
+    // Chunks of a segmented frame are decoded by chunk contexts
+    ZL_GraphID const head = split(
+            { 20000, 20000, 0 },
+            { ZL_GRAPH_BZIP3, ZL_GRAPH_LZMA2, ZL_GRAPH_COMPRESS_GENERIC });
+    select(ZL_Compressor_buildSerialSegmenter(compressor_, 100000, head));
+    std::string const src = genData(1050000, 16);
+    Outcome const serial  = compress(compressor_, src, { 0, 0, false });
+    ASSERT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+
+    for (int nbWorkers : { 0, 2, 3, 8 }) {
+        auto const [code, dst] =
+                decompress(serial.frame, src.size(), nbWorkers);
+        EXPECT_EQ(code, ZL_ErrorCode_no_error) << nbWorkers;
+        EXPECT_TRUE(dst == src) << nbWorkers;
+    }
+    // Output buffer too small
+    for (int nbWorkers : { 0, 4 }) {
+        EXPECT_NE(
+                decompress(serial.frame, src.size() - 1, nbWorkers).first,
+                ZL_ErrorCode_no_error);
+    }
+    // Corrupted frames fail the same way, whatever the number of threads
+    for (bool checksums : { true, false }) {
+        for (size_t pos = 10; pos < serial.frame.size();
+             pos += serial.frame.size() / 37) {
+            std::string corrupted = serial.frame;
+            corrupted[pos] ^= 0x5A;
+            auto const expected =
+                    decompress(corrupted, src.size(), 0, checksums);
+            for (int nbWorkers : { 2, 8 }) {
+                auto const actual =
+                        decompress(corrupted, src.size(), nbWorkers, checksums);
+                EXPECT_EQ(actual.first, expected.first) << pos;
+                EXPECT_TRUE(actual.second == expected.second) << pos;
+            }
+        }
     }
 }
 

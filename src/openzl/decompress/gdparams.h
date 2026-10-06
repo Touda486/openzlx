@@ -19,6 +19,7 @@ typedef struct {
     ZL_TernaryParam checkCompressedChecksum;
     ZL_TernaryParam checkContentChecksum;
     ZL_TernaryParam enableCodecFusion;
+    int nbWorkers; ///< 0 or 1: serial decoding
 } GDParams;
 
 // All defaults for Global parameters
