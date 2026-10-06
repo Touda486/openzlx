@@ -914,6 +914,22 @@ CCTX_tryGraph(
         const ZL_RuntimeGraphParameters* params);
 
 /**
+ * @brief Same as CCTX_tryGraph() for each of @p graphs, writing the outcome
+ * of trying @p graphs[n] into @p results[n].
+ *
+ * When ZL_CParam_nbWorkers > 1, trials run in parallel, on the thread pool.
+ * Results don't depend on it.
+ */
+void CCTX_tryGraphs(
+        ZL_CCtx* parentCCtx,
+        const ZL_Input* inputs[],
+        size_t numInputs,
+        Arena* wkspArena,
+        const ZL_GraphID graphs[],
+        size_t nbGraphs,
+        ZL_RESULT_OF(ZL_GraphPerformance) results[]);
+
+/**
  * @return The comment stored in the cctx.
  */
 ZL_Comment CCTX_getHeaderComment(const ZL_CCtx* cctx);

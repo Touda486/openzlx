@@ -3178,6 +3178,127 @@ CCTX_tryGraph(
     return result;
 }
 
+/* Parallel trials, see CCTX_tryGraphs() */
+typedef struct {
+    ZL_PoolJob job;
+    ZL_CCtx* cctx; // derived context, NULL when the trial couldn't start
+    void* dst;
+    size_t dstCapacity;
+    const ZL_Input** inputs;
+    size_t numInputs;
+    ZL_GraphID graph;
+    ZL_RESULT_OF(ZL_GraphPerformance) result;
+} CCTX_TrialTask;
+
+/* Runs on a worker thread, or on the calling thread */
+static void CCTX_runTrialJob(void* opaque)
+{
+    CCTX_TrialTask* const task = (CCTX_TrialTask*)opaque;
+    task->result               = CCTX_tryGraphInternal(
+            task->cctx,
+            task->dst,
+            task->dstCapacity,
+            task->inputs,
+            task->numInputs,
+            task->graph,
+            NULL);
+}
+
+static int CCTX_trialsMTEligible(
+        ZL_CCtx* cctx,
+        size_t inputSize,
+        size_t nbGraphs)
+{
+    if (nbGraphs < 2 || cctx->appliedGCParams.nbWorkers <= 1) {
+        return 0;
+    }
+    if (!ZL_MULTITHREAD && !(cctx->mtTestingFlags & CCTX_MT_SYNCHRONOUS)) {
+        return 0;
+    }
+    // Trials don't run trials in parallel themselves
+    if (cctx->fanOutDisabled || cctx->inBackupMode
+        || cctx->opCtx.hasCompressionHooks) {
+        return 0;
+    }
+    if (!(cctx->mtTestingFlags & CCTX_MT_FORCE_OFFLOAD)
+        && inputSize < (size_t)cctx->appliedGCParams.mtMinTaskSize) {
+        return 0;
+    }
+    return 1;
+}
+
+void CCTX_tryGraphs(
+        ZL_CCtx* parentCCtx,
+        const ZL_Input* inputs[],
+        size_t numInputs,
+        Arena* wkspArena,
+        const ZL_GraphID graphs[],
+        size_t nbGraphs,
+        ZL_RESULT_OF(ZL_GraphPerformance) results[])
+{
+    ZL_RESULT_DECLARE_SCOPE(ZL_GraphPerformance, NULL);
+    size_t totalInputSize = 0;
+    for (size_t i = 0; i < numInputs; ++i) {
+        totalInputSize += ZL_Input_contentSize(inputs[i]);
+        if (ZL_Input_type(inputs[i]) == ZL_Type_string) {
+            totalInputSize += ZL_Input_numElts(inputs[i]) * sizeof(uint32_t);
+        }
+    }
+    int const synchronous =
+            (parentCCtx->mtTestingFlags & CCTX_MT_SYNCHRONOUS) != 0;
+    CCTX_TrialTask* tasks = NULL;
+    if (numInputs > 0
+        && CCTX_trialsMTEligible(parentCCtx, totalInputSize, nbGraphs)
+        && (synchronous
+            || !ZL_isError(CCTX_ensureThreadPool(
+                    parentCCtx,
+                    (unsigned)parentCCtx->appliedGCParams.nbWorkers - 1)))) {
+        tasks = ALLOC_Arena_calloc(wkspArena, nbGraphs * sizeof(*tasks));
+    }
+    if (tasks == NULL) {
+        for (size_t n = 0; n < nbGraphs; n++) {
+            results[n] = CCTX_tryGraph(
+                    parentCCtx, inputs, numInputs, wkspArena, graphs[n], NULL);
+        }
+        return;
+    }
+
+    // Trials share the cache of the parent context, which is thread-safe
+    (void)CCTX_enableTryGraphCodecOutputCache(parentCCtx);
+    ZL_ThreadPool* const pool = CCTX_threadPool(parentCCtx);
+    const size_t dstCapacity  = ZL_compressBound(totalInputSize);
+    for (size_t n = 0; n < nbGraphs; n++) {
+        CCTX_TrialTask* const task = tasks + n;
+        task->dst         = ALLOC_Arena_malloc(wkspArena, dstCapacity);
+        task->cctx        = task->dst ? CCTX_createDerivedCCtx(parentCCtx) : NULL;
+        if (task->cctx == NULL) {
+            task->result = ZL_RESULT_MAKE_ERROR(ZL_GraphPerformance, allocation);
+            continue;
+        }
+        task->job         = (ZL_PoolJob){ .fn = CCTX_runTrialJob, .opaque = task };
+        task->dstCapacity = dstCapacity;
+        task->inputs      = inputs;
+        task->numInputs   = numInputs;
+        task->graph       = graphs[n];
+        if (!synchronous) {
+            ZL_ThreadPool_submit(pool, &task->job);
+        }
+    }
+    for (size_t n = 0; n < nbGraphs; n++) {
+        CCTX_TrialTask* const task = tasks + n;
+        if (task->cctx != NULL) {
+            if (synchronous) {
+                CCTX_runTrialJob(task);
+            } else {
+                ZL_ThreadPool_waitOrRun(pool, &task->job);
+            }
+            CCTX_free(task->cctx);
+        }
+        results[n] = task->result;
+    }
+    CCTX_disableTryGraphCodecOutputCacheInsertions(parentCCtx);
+}
+
 ZL_Report
 CCTX_setHeaderComment(ZL_CCtx* cctx, const void* comment, size_t commentSize)
 {

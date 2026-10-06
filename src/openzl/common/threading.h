@@ -39,6 +39,26 @@ typedef struct ZL_PoolJob_s {
 
 typedef struct ZL_ThreadPool_s ZL_ThreadPool;
 
+/* ZL_Mutex :
+ * A plain, non-recursive mutex. All operations are no-ops when
+ * ZL_MULTITHREAD is 0. */
+#if ZL_MULTITHREAD
+#    include <pthread.h>
+typedef struct {
+    pthread_mutex_t mutex;
+} ZL_Mutex;
+#else
+typedef struct {
+    int unused;
+} ZL_Mutex;
+#endif
+
+/// @returns 0 on success
+int ZL_Mutex_init(ZL_Mutex* mutex);
+void ZL_Mutex_destroy(ZL_Mutex* mutex);
+void ZL_Mutex_lock(ZL_Mutex* mutex);
+void ZL_Mutex_unlock(ZL_Mutex* mutex);
+
 /**
  * Creates a pool of @p nbThreads background threads.
  * @returns NULL on failure, or when ZL_MULTITHREAD is disabled.

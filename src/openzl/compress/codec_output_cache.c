@@ -8,6 +8,7 @@
 #include "openzl/common/assertion.h"
 #include "openzl/common/map.h"
 #include "openzl/common/stream.h"
+#include "openzl/common/threading.h"
 #include "openzl/compress/cctx.h"
 #include "openzl/compress/cgraph.h"
 #include "openzl/compress/cnode.h"
@@ -51,7 +52,11 @@ ZL_DECLARE_CUSTOM_MAP_TYPE(
         CodecCache_Key,
         const CodecCache_Result*);
 
+/* Lookups and insertions can happen concurrently, from tryGraph() trials
+ * running in parallel (see CCTX_tryGraphs()): they are serialized by @mutex.
+ * Other operations are only invoked while the cache isn't in use. */
 struct ZL_CodecOutputCache_s {
+    ZL_Mutex mutex;
     Arena* cacheArena;
     CodecCache_Map map;
     size_t maxBytes;
@@ -68,6 +73,12 @@ struct CodecCache_Lookup_s {
     CodecCache_Key key;
     const CodecCache_Result* result;
 };
+
+// Must be invoked with @cache->mutex held
+static void CodecCache_recordHashReuse_locked(ZL_CodecOutputCache* cache);
+static void CodecCache_recordSkip_locked(
+        ZL_CodecOutputCache* cache,
+        CodecCache_SkipReason reason);
 
 static bool CodecCache_equalBytes(const void* lhs, const void* rhs, size_t size)
 {
@@ -216,7 +227,7 @@ static bool CodecCache_buildInput(
     uint64_t memoizedHash;
     if (STREAM_getCodecCacheKeyHash(input, &memoizedHash)) {
         *contentHash = memoizedHash;
-        CodecCache_recordHashReuse(cache);
+        CodecCache_recordHashReuse_locked(cache);
         return true;
     }
 
@@ -345,24 +356,24 @@ static bool CodecCache_buildKey(
 {
     ZL_IDType standardNodeID;
     if (!CodecCache_getStandardNodeID(&standardNodeID, encoder, node)) {
-        CodecCache_recordSkip(cache, CodecCache_SkipReason_customCodec);
+        CodecCache_recordSkip_locked(cache, CodecCache_SkipReason_customCodec);
         return false;
     }
     if (CNODE_getDictIndex(encoder->cnode) != ZL_DICT_INDEX_NONE) {
-        CodecCache_recordSkip(cache, CodecCache_SkipReason_dict);
+        CodecCache_recordSkip_locked(cache, CodecCache_SkipReason_dict);
         return false;
     }
     if (CNODE_getMParamObj(encoder->cnode) != NULL) {
-        CodecCache_recordSkip(cache, CodecCache_SkipReason_mparam);
+        CodecCache_recordSkip_locked(cache, CodecCache_SkipReason_mparam);
         return false;
     }
     if (encoder->lparams != NULL
         && encoder->lparams->refParams.nbRefParams != 0) {
-        CodecCache_recordSkip(cache, CodecCache_SkipReason_refParam);
+        CodecCache_recordSkip_locked(cache, CodecCache_SkipReason_refParam);
         return false;
     }
     if (ZL_Data_type(input) == ZL_Type_string) {
-        CodecCache_recordSkip(cache, CodecCache_SkipReason_string);
+        CodecCache_recordSkip_locked(cache, CodecCache_SkipReason_string);
         return false;
     }
 
@@ -404,8 +415,13 @@ ZL_CodecOutputCache* CodecCache_create(size_t maxBytes)
     if (cache == NULL) {
         return NULL;
     }
+    if (ZL_Mutex_init(&cache->mutex) != 0) {
+        ZL_free(cache);
+        return NULL;
+    }
     cache->cacheArena = ALLOC_HeapArena_create();
     if (cache->cacheArena == NULL) {
+        ZL_Mutex_destroy(&cache->mutex);
         ZL_free(cache);
         return NULL;
     }
@@ -427,6 +443,7 @@ void CodecCache_free(ZL_CodecOutputCache* cache)
         return;
     }
     ALLOC_Arena_freeArena(cache->cacheArena);
+    ZL_Mutex_destroy(&cache->mutex);
     ZL_free(cache);
 }
 
@@ -488,12 +505,20 @@ void CodecCache_setInsertionsEnabled(ZL_CodecOutputCache* cache, bool enabled)
     cache->insertionsEnabled = enabled;
 }
 
-void CodecCache_recordHashReuse(ZL_CodecOutputCache* cache)
+static void CodecCache_recordHashReuse_locked(ZL_CodecOutputCache* cache)
 {
     ZL_ASSERT_NN(cache);
     if (cache->statsEnabled) {
         ++cache->hashReuses;
     }
+}
+
+void CodecCache_recordHashReuse(ZL_CodecOutputCache* cache)
+{
+    ZL_ASSERT_NN(cache);
+    ZL_Mutex_lock(&cache->mutex);
+    CodecCache_recordHashReuse_locked(cache);
+    ZL_Mutex_unlock(&cache->mutex);
 }
 
 size_t CodecCache_getHashReuses(const ZL_CodecOutputCache* cache)
@@ -532,7 +557,7 @@ CodecCache_Stats CodecCache_getLastCompletedStats(
     return cache->lastCompletedStats;
 }
 
-void CodecCache_recordSkip(
+static void CodecCache_recordSkip_locked(
         ZL_CodecOutputCache* cache,
         CodecCache_SkipReason reason)
 {
@@ -562,6 +587,16 @@ void CodecCache_recordSkip(
     }
 }
 
+void CodecCache_recordSkip(
+        ZL_CodecOutputCache* cache,
+        CodecCache_SkipReason reason)
+{
+    ZL_ASSERT_NN(cache);
+    ZL_Mutex_lock(&cache->mutex);
+    CodecCache_recordSkip_locked(cache, reason);
+    ZL_Mutex_unlock(&cache->mutex);
+}
+
 ZL_CodecOutputCache* ZL_CodecOutputCache_create(void)
 {
     return CodecCache_create(CodecCache_getDefaultMaxBytes());
@@ -582,7 +617,7 @@ void ZL_CodecOutputCache_reset(ZL_CodecOutputCache* cache)
     CodecCache_reset(cache);
 }
 
-CodecCache_Lookup* CodecCache_lookup(
+static CodecCache_Lookup* CodecCache_lookup_locked(
         ZL_CodecOutputCache* cache,
         ZL_Encoder* encoder,
         ZL_NodeID node,
@@ -613,6 +648,20 @@ CodecCache_Lookup* CodecCache_lookup(
         }
         lookup->result = found->val;
     }
+    return lookup;
+}
+
+CodecCache_Lookup* CodecCache_lookup(
+        ZL_CodecOutputCache* cache,
+        ZL_Encoder* encoder,
+        ZL_NodeID node,
+        const ZL_Data* input)
+{
+    ZL_ASSERT_NN(cache);
+    ZL_Mutex_lock(&cache->mutex);
+    CodecCache_Lookup* const lookup =
+            CodecCache_lookup_locked(cache, encoder, node, input);
+    ZL_Mutex_unlock(&cache->mutex);
     return lookup;
 }
 
@@ -799,7 +848,7 @@ static void CodecCache_freeStoredEntry(
     }
 }
 
-CodecCache_InsertResult CodecCache_store(
+static CodecCache_InsertResult CodecCache_store_locked(
         const CodecCache_Lookup* lookup,
         const CodecCache_Result* result)
 {
@@ -814,7 +863,7 @@ CodecCache_InsertResult CodecCache_store(
 
     for (size_t i = 0; i < result->nbOutputs; ++i) {
         if (result->outputs[i].type == ZL_Type_string) {
-            CodecCache_recordSkip(cache, CodecCache_SkipReason_string);
+            CodecCache_recordSkip_locked(cache, CodecCache_SkipReason_string);
             return CodecCache_InsertResult_notCacheable;
         }
     }
@@ -895,4 +944,16 @@ allocationFailure:
         ++cache->stats.allocationFailures;
     }
     return CodecCache_InsertResult_allocationFailure;
+}
+
+CodecCache_InsertResult CodecCache_store(
+        const CodecCache_Lookup* lookup,
+        const CodecCache_Result* result)
+{
+    ZL_ASSERT_NN(lookup);
+    ZL_CodecOutputCache* const cache = lookup->cache;
+    ZL_Mutex_lock(&cache->mutex);
+    CodecCache_InsertResult const r = CodecCache_store_locked(lookup, result);
+    ZL_Mutex_unlock(&cache->mutex);
+    return r;
 }

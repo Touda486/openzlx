@@ -268,3 +268,50 @@ int ZL_ThreadPool_cancel(ZL_ThreadPool* pool, ZL_PoolJob* job)
 }
 
 #endif // ZL_MULTITHREAD
+
+#if ZL_MULTITHREAD
+
+int ZL_Mutex_init(ZL_Mutex* mutex)
+{
+    return pthread_mutex_init(&mutex->mutex, NULL);
+}
+
+void ZL_Mutex_destroy(ZL_Mutex* mutex)
+{
+    pthread_mutex_destroy(&mutex->mutex);
+}
+
+void ZL_Mutex_lock(ZL_Mutex* mutex)
+{
+    pthread_mutex_lock(&mutex->mutex);
+}
+
+void ZL_Mutex_unlock(ZL_Mutex* mutex)
+{
+    pthread_mutex_unlock(&mutex->mutex);
+}
+
+#else // ZL_MULTITHREAD
+
+int ZL_Mutex_init(ZL_Mutex* mutex)
+{
+    (void)mutex;
+    return 0;
+}
+
+void ZL_Mutex_destroy(ZL_Mutex* mutex)
+{
+    (void)mutex;
+}
+
+void ZL_Mutex_lock(ZL_Mutex* mutex)
+{
+    (void)mutex;
+}
+
+void ZL_Mutex_unlock(ZL_Mutex* mutex)
+{
+    (void)mutex;
+}
+
+#endif // ZL_MULTITHREAD

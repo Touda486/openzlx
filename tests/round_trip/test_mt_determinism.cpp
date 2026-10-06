@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "openzl/codecs/zl_brute_force_selector.h"
 #include "openzl/codecs/zl_bzip3.h"
 #include "openzl/codecs/zl_conversion.h"
 #include "openzl/codecs/zl_deflate.h"
@@ -421,6 +422,38 @@ TEST_F(MTDeterminismTest, SegmenterChunksStrictFailure)
             src,
             { 4, CCTX_MT_FORCE_OFFLOAD | CCTX_MT_SYNCHRONOUS, false });
     EXPECT_GT(mt.stats.nbFallbacks, 0u);
+}
+
+TEST_F(MTDeterminismTest, ParallelTrials)
+{
+    // A single stream: its backends are tried in parallel, first on a sample,
+    // then on the entire stream
+    ASSERT_FALSE(ZL_isError(ZL_Compressor_setParameter(
+            compressor_,
+            ZL_CParam_serialBackendSearch,
+            ZL_SerialBackendSearch_all)));
+    ASSERT_FALSE(ZL_isError(ZL_Compressor_setParameter(
+            compressor_, ZL_CParam_serialBackendSearchSampleSize, 64 << 10)));
+    select(ZL_GRAPH_COMPRESS_GENERIC);
+    Outcome const serial = testAllConfigs(genData(300000, 13), false, false);
+    EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+}
+
+TEST_F(MTDeterminismTest, ParallelBruteForceTrials)
+{
+    std::vector<ZL_GraphID> const graphs = {
+        ZL_GRAPH_ZSTD, le32FieldLz(), ZL_GRAPH_BZIP3, ZL_GRAPH_STORE
+    };
+    ZL_RESULT_OF(ZL_GraphID)
+    const selector = ZL_Compressor_buildBruteForceSelectorGraph(
+            compressor_, graphs.data(), graphs.size());
+    ASSERT_FALSE(ZL_RES_isError(selector));
+    select(ZL_RES_value(selector));
+    // An odd size makes le32FieldLz() fail
+    for (size_t size : { 200000, 200001 }) {
+        Outcome const serial = testAllConfigs(genData(size, 14), false, false);
+        EXPECT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
+    }
 }
 
 TEST(MTParametersTest, Validation)

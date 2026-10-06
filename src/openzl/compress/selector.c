@@ -62,6 +62,40 @@ ZL_GraphReport ZL_Selector_tryGraph(
     return ret;
 }
 
+void ZL_Selector_tryGraphs(
+        const ZL_Selector* selCtx,
+        const ZL_Input* input,
+        const ZL_GraphID graphids[],
+        size_t nbGraphs,
+        ZL_GraphReport reports[])
+{
+    ZL_RESULT_OF(ZL_GraphPerformance)* const perfs = ALLOC_Arena_malloc(
+            selCtx->wkspArena, nbGraphs * sizeof(perfs[0]));
+    if (perfs == NULL) {
+        for (size_t n = 0; n < nbGraphs; n++) {
+            reports[n] = ZL_Selector_tryGraph(selCtx, input, graphids[n]);
+        }
+        return;
+    }
+    CCTX_tryGraphs(
+            selCtx->cctx,
+            &input,
+            1,
+            selCtx->wkspArena,
+            graphids,
+            nbGraphs,
+            perfs);
+    for (size_t n = 0; n < nbGraphs; n++) {
+        if (ZL_RES_isError(perfs[n])) {
+            reports[n].finalCompressedSize =
+                    ZL_returnError(ZL_RES_code(perfs[n]));
+        } else {
+            reports[n].finalCompressedSize =
+                    ZL_returnValue(ZL_RES_value(perfs[n]).compressedSize);
+        }
+    }
+}
+
 ZL_Report ZL_Selector_setSuccessorParams(
         const ZL_Selector* selCtx,
         const ZL_LocalParams* lparams)

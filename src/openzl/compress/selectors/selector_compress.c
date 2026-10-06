@@ -103,15 +103,15 @@ static size_t SI_preselectOnSample(
     if (ref == NULL) {
         return nbCandidates;
     }
+    ZL_GraphReport reports[4];
     size_t sizes[4];
     size_t best = (size_t)-1;
     ZL_ASSERT_LE(nbCandidates, 4);
+    ZL_Selector_tryGraphs(selCtx, ref, candidates, nbCandidates, reports);
     for (size_t n = 0; n < nbCandidates; n++) {
-        ZL_GraphReport const gr =
-                ZL_Selector_tryGraph(selCtx, ref, candidates[n]);
-        sizes[n] = ZL_isError(gr.finalCompressedSize)
+        sizes[n] = ZL_isError(reports[n].finalCompressedSize)
                 ? (size_t)-1
-                : ZL_validResult(gr.finalCompressedSize);
+                : ZL_validResult(reports[n].finalCompressedSize);
         if (sizes[n] < best) {
             best = sizes[n];
         }

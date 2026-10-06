@@ -26,23 +26,32 @@ ZL_GraphID SI_selector_brute_force(
     if (inputType == ZL_Type_string) {
         bestSize += ZL_Input_numElts(inputStream) * sizeof(uint32_t);
     }
-    int64_t bestIdx = -1;
+    // Skip successors that can't be fed the input type, since the
+    // successor list is user-provided and isn't validated at registration.
+    ZL_GraphID* const graphs = ZL_Selector_getScratchSpace(
+            selCtx, (nbCustomGraphs + 1) * sizeof(ZL_GraphID));
+    ZL_GraphReport* const reports = ZL_Selector_getScratchSpace(
+            selCtx, (nbCustomGraphs + 1) * sizeof(ZL_GraphReport));
+    if (graphs == NULL || reports == NULL) {
+        return ZL_GRAPH_STORE;
+    }
+    size_t nbGraphs = 0;
     for (size_t i = 0; i < nbCustomGraphs; ++i) {
-        // Skip successors that can't be fed the input type, since the
-        // successor list is user-provided and isn't validated at registration.
-        if (!ICONV_isCompatible(
+        if (ICONV_isCompatible(
                     inputType,
                     ZL_Selector_getInput0MaskForGraph(
                             selCtx, customGraphs[i]))) {
+            graphs[nbGraphs++] = customGraphs[i];
+        }
+    }
+    ZL_Selector_tryGraphs(selCtx, inputStream, graphs, nbGraphs, reports);
+
+    int64_t bestIdx = -1;
+    for (size_t i = 0; i < nbGraphs; ++i) {
+        if (ZL_isError(reports[i].finalCompressedSize)) {
             continue;
         }
-        ZL_GraphReport gr =
-                ZL_Selector_tryGraph(selCtx, inputStream, customGraphs[i]);
-        if (ZL_isError(gr.finalCompressedSize)) {
-            continue;
-        }
-        size_t currSize = ZL_validResult(gr.finalCompressedSize);
-        // printf("curr: %zu, best: %zu\n", currSize, bestSize);
+        size_t currSize = ZL_validResult(reports[i].finalCompressedSize);
         if (currSize < bestSize) {
             bestSize = currSize;
             bestIdx  = (int64_t)i;
@@ -51,7 +60,7 @@ ZL_GraphID SI_selector_brute_force(
     if (bestIdx == -1) {
         return ZL_GRAPH_STORE;
     }
-    return customGraphs[bestIdx];
+    return graphs[bestIdx];
 }
 
 ZL_RESULT_OF(ZL_GraphID)

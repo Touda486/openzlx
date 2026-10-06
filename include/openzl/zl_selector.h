@@ -297,6 +297,19 @@ ZL_GraphReport ZL_Selector_tryGraph(
         const ZL_Input* input,
         ZL_GraphID graphid);
 
+/**
+ * Same as ZL_Selector_tryGraph() for each of @p graphids:
+ * @p reports[n] receives the outcome of trying @p graphids[n].
+ * When multi-threading is enabled (see ZL_CParam_nbWorkers), trials run in
+ * parallel. Reports don't depend on it.
+ */
+void ZL_Selector_tryGraphs(
+        const ZL_Selector* selCtx,
+        const ZL_Input* input,
+        const ZL_GraphID graphids[],
+        size_t nbGraphs,
+        ZL_GraphReport reports[]);
+
 ZL_Report ZL_Selector_setSuccessorParams(
         const ZL_Selector* selCtx,
         const ZL_LocalParams* lparams);
