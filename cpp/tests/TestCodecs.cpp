@@ -127,20 +127,30 @@ TEST_F(TestCodecs, serialBackendSearch)
         return testRoundTrip(compressor, Input::refSerial(data)).size();
     };
     const size_t zstdOnly = compressedSize(0, ZL_MAX_FORMAT_VERSION);
-    size_t all            = zstdOnly;
+    EXPECT_EQ(
+            compressedSize(ZL_SerialBackendSearch_zstd, ZL_MAX_FORMAT_VERSION),
+            zstdOnly);
+    const size_t all =
+            compressedSize(ZL_SerialBackendSearch_all, ZL_MAX_FORMAT_VERSION);
     for (int search = 1; search <= ZL_SerialBackendSearch_all; ++search) {
         const size_t size = compressedSize(search, ZL_MAX_FORMAT_VERSION);
-        EXPECT_LE(size, zstdOnly) << "search=" << search;
-        if (search == ZL_SerialBackendSearch_all) {
-            all = size;
+        if (search & ZL_SerialBackendSearch_zstd) {
+            EXPECT_LE(size, zstdOnly) << "search=" << search;
         }
+        EXPECT_LE(all, size) << "search=" << search;
     }
     EXPECT_LT(all, zstdOnly);
+    // Without zstd among the candidates, lzma2 alone is used
+    EXPECT_LT(
+            compressedSize(ZL_SerialBackendSearch_lzma2, ZL_MAX_FORMAT_VERSION),
+            zstdOnly);
     // Older format versions can't use the new backends, and fall back to zstd
-    EXPECT_EQ(compressedSize(ZL_SerialBackendSearch_all, 27), compressedSize(0, 27));
+    const size_t zstdOnlyV27 = compressedSize(0, 27);
+    EXPECT_EQ(compressedSize(ZL_SerialBackendSearch_all, 27), zstdOnlyV27);
+    EXPECT_EQ(compressedSize(ZL_SerialBackendSearch_lzma2, 27), zstdOnlyV27);
     // Invalid values are rejected
     Compressor compressor;
-    EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, 8));
+    EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, 16));
     EXPECT_ANY_THROW(compressor.setParameter(CParam::SerialBackendSearch, -1));
 }
 

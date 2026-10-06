@@ -75,21 +75,36 @@ ZL_GraphID SI_selector_compress_serial(
     // backends by trying each of them, and keep the smallest result.
     const int search =
             ZL_Selector_getCParam(selCtx, ZL_CParam_serialBackendSearch);
+    // Backends unsupported by the format version are skipped.
     if (search > 0) {
         ZL_GraphID candidates[4];
-        size_t nbCandidates        = 0;
-        candidates[nbCandidates++] = ZL_GRAPH_ZSTD;
-        if (search & ZL_SerialBackendSearch_deflate) {
+        size_t nbCandidates = 0;
+        if (search & ZL_SerialBackendSearch_zstd) {
+            candidates[nbCandidates++] = ZL_GRAPH_ZSTD;
+        }
+        if ((search & ZL_SerialBackendSearch_deflate)
+            && ZL_Selector_isNodeSupported(
+                    selCtx,
+                    ZL_MAKE_NODE_ID(ZL_PrivateStandardNodeID_deflate))) {
             candidates[nbCandidates++] = ZL_GRAPH_DEFLATE;
         }
-        if (search & ZL_SerialBackendSearch_lzma2) {
+        if ((search & ZL_SerialBackendSearch_lzma2)
+            && ZL_Selector_isNodeSupported(
+                    selCtx, ZL_MAKE_NODE_ID(ZL_PrivateStandardNodeID_lzma2))) {
             candidates[nbCandidates++] = ZL_GRAPH_LZMA2;
         }
-        if (search & ZL_SerialBackendSearch_bzip3) {
+        if ((search & ZL_SerialBackendSearch_bzip3)
+            && ZL_Selector_isNodeSupported(
+                    selCtx, ZL_MAKE_NODE_ID(ZL_PrivateStandardNodeID_bzip3))) {
             candidates[nbCandidates++] = ZL_GRAPH_BZIP3;
         }
-        return SI_selector_brute_force(
-                selCtx, inputStream, candidates, nbCandidates);
+        if (nbCandidates == 1) {
+            return candidates[0];
+        }
+        if (nbCandidates > 1) {
+            return SI_selector_brute_force(
+                    selCtx, inputStream, candidates, nbCandidates);
+        }
     }
     // In the future, we will probably arbitrate here between several methods.
     // Other LZ engines such as FastLZ and ROLZ come to mind.

@@ -52,7 +52,7 @@ void ProfileArgs::addArgs(arg::ArgParser& parser)
             kSerialBackendSearch,
             0,
             true,
-            "Experimental: bitmask of extra backends that the generic serial compressor tries next to zstd, keeping the smallest result (1=deflate, 2=lzma2, 4=bzip3, 7=all). Default: 0, always zstd.");
+            "Experimental: bitmask of the backends that the generic serial compressor tries, keeping the smallest result (1=zstd, 2=deflate, 4=lzma2, 8=bzip3, 15=all). A single backend is used directly. Default: 0, always zstd.");
 }
 
 ProfileArgs::ProfileArgs(const arg::ParsedArgs& parsed)

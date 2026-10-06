@@ -5,9 +5,9 @@ the backend of its streams improve the compression ratio?
 
 Two mechanisms are measured:
 1. **No training**: `--serial-backend-search <mask>` makes
-   `ZL_GRAPH_COMPRESS_GENERIC` try zstd plus the selected backends on each
-   serial stream, and keep the smallest (1 = deflate, 2 = lzma2, 4 = bzip3,
-   7 = all).
+   `ZL_GRAPH_COMPRESS_GENERIC` try the selected backends on each serial
+   stream, and keep the smallest (1 = zstd, 2 = deflate, 4 = lzma2,
+   8 = bzip3, 15 = all). The experiment always includes zstd.
 2. **Training**: `zli train --ace-extra-backends` lets ACE also pick these
    backends. It is compared to the same training without the flag.
 

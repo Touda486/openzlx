@@ -6,8 +6,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-# Masks: 0 = zstd only, 1 = +deflate, 2 = +lzma2, 4 = +bzip3, 7 = all
-MASKS=(${MASKS:-0 1 2 4 7})
+# Masks: 0 = zstd only, 3 = zstd+deflate, 5 = zstd+lzma2, 9 = zstd+bzip3,
+# 15 = all
+MASKS=(${MASKS:-0 3 5 9 15})
 
 for mask in "${MASKS[@]}"; do
     bench "untrained_silesia_generic_m$mask" "$SILESIA" \
@@ -23,5 +24,5 @@ done
 bench reference_silesia_serial "$SILESIA" -p serial
 
 # Which backend got which bytes, when all of them are available
-trace untrained_silesia_generic_m7 "$SILESIA" -p generic --serial-backend-search 7
-trace untrained_psam_csv_m7 "$PSAM_TEST" -p csv --serial-backend-search 7
+trace untrained_silesia_generic_m15 "$SILESIA" -p generic --serial-backend-search 15
+trace untrained_psam_csv_m15 "$PSAM_TEST" -p csv --serial-backend-search 15

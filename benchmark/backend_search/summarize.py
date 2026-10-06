@@ -182,7 +182,7 @@ def main() -> None:
                 }
             )
 
-    masks = {1: "+deflate", 2: "+lzma2", 4: "+bzip3", 7: "+all"}
+    masks = {3: "+deflate", 5: "+lzma2", 9: "+bzip3", 15: "+all"}
     for dataset in ["silesia_generic", "psam_csv"]:
         for mask, label in masks.items():
             compare(
