@@ -24,6 +24,7 @@
 #include "openzl/codecs/zl_zstd.h"
 #include "openzl/common/threading.h" // ZL_MULTITHREAD
 #include "openzl/compress/cctx.h"      // CCTX_setMTTestingFlags
+#include "openzl/decompress/dctx2.h"   // DCTX_setMTTestingFlags
 #include "openzl/zl_compress.h"
 #include "openzl/zl_compressor.h"
 #include "openzl/zl_decompress.h"
@@ -463,11 +464,14 @@ std::pair<ZL_ErrorCode, std::string> decompress(
         const std::string& frame,
         size_t dstSize,
         int nbWorkers,
-        bool checksums = true)
+        bool checksums = true,
+        bool forceParallel = true)
 {
     ZL_DCtx* const dctx = ZL_DCtx_create();
     EXPECT_FALSE(ZL_isError(
             ZL_DCtx_setParameter(dctx, ZL_DParam_nbWorkers, nbWorkers)));
+    // Even small streams and chunks are decoded in parallel
+    DCTX_setMTTestingFlags(dctx, forceParallel ? DCTX_MT_FORCE_PARALLEL : 0);
     if (!checksums) {
         for (ZL_DParam p : { ZL_DParam_checkCompressedChecksum,
                              ZL_DParam_checkContentChecksum }) {
@@ -540,10 +544,12 @@ TEST_F(MTDeterminismTest, ParallelChunkDecoding)
     ASSERT_EQ(serial.errorCode, ZL_ErrorCode_no_error);
 
     for (int nbWorkers : { 0, 2, 3, 8 }) {
-        auto const [code, dst] =
-                decompress(serial.frame, src.size(), nbWorkers);
-        EXPECT_EQ(code, ZL_ErrorCode_no_error) << nbWorkers;
-        EXPECT_TRUE(dst == src) << nbWorkers;
+        for (bool force : { true, false }) {
+            auto const [code, dst] = decompress(
+                    serial.frame, src.size(), nbWorkers, true, force);
+            EXPECT_EQ(code, ZL_ErrorCode_no_error) << nbWorkers;
+            EXPECT_TRUE(dst == src) << nbWorkers;
+        }
     }
     // Output buffer too small
     for (int nbWorkers : { 0, 4 }) {

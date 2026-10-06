@@ -99,6 +99,7 @@ struct ZL_DCtx_s {
     ZL_ThreadPool* sharedPool; // borrowed from the parent, for chunk contexts
     ZL_DCtx** idleChildren;    // owned; reusable chunk contexts
     size_t nbIdleChildren;
+    unsigned mtTestingFlags; // DCTX_MT_* flags
     ZL_Mutex streamMutex; // serializes stream creation while decoders run
                           // in parallel
     bool parallelDecoders;
@@ -176,6 +177,12 @@ ZL_Report ZL_DCtx_setStreamArena(ZL_DCtx* dctx, ZL_DataArenaType sat)
     ALLOC_Arena_freeArena(dctx->streamArena);
     dctx->streamArena = newArena;
     return ZL_returnSuccess();
+}
+
+void DCTX_setMTTestingFlags(ZL_DCtx* dctx, unsigned flags)
+{
+    ZL_ASSERT_NN(dctx);
+    dctx->mtTestingFlags = flags;
 }
 
 void DCTX_preserveStreams(ZL_DCtx* dctx)
@@ -1726,6 +1733,14 @@ static ZL_ThreadPool* DCTX_threadPool(ZL_DCtx* dctx)
     return dctx->pool;
 }
 
+// In zstd-equivalent compressed bytes
+#define DCTX_MT_MIN_DECODING_COST (64 << 10)
+/* Chunk contexts allocate memory from worker threads, which can be much
+ * slower than from the calling thread (e.g. with glibc's per-thread arenas).
+ * This only pays off for chunks whose decoding is dominated by heavy codecs.
+ * In zstd-equivalent compressed bytes. */
+#define DCTX_MT_MIN_CHUNK_DECODING_COST (16 << 20)
+
 typedef struct {
     ZL_PoolJob job;
     ZL_DCtx* dctx;
@@ -1740,23 +1755,53 @@ typedef struct {
     ZL_Report report;
 } DCTX_DecoderTask;
 
+/* @returns the decoding cost of @p nodeInfo, in zstd-equivalent compressed
+ * bytes, if it's a general purpose backend decoding streams stored in the
+ * frame, or 0 otherwise. */
+static size_t DCTX_backendDecodingCost(
+        const ZL_DCtx* dctx,
+        const DFH_NodeInfo* nodeInfo)
+{
+    if (nodeInfo->trpid.trt != trt_standard) {
+        return 0;
+    }
+    // Relative decoding cost per compressed byte
+    size_t cost;
+    switch (nodeInfo->trpid.trid) {
+        case ZL_StandardTransformID_zstd:
+            cost = 1;
+            break;
+        case ZL_StandardTransformID_deflate:
+            cost = 4;
+            break;
+        case ZL_StandardTransformID_lzma2:
+            cost = 16;
+            break;
+        case ZL_StandardTransformID_bzip3:
+            cost = 128;
+            break;
+        default:
+            return 0;
+    }
+    size_t storedSize = 0;
+    for (size_t n = 0; n < nodeInfo->numInputStreams; n++) {
+        const ZL_DCtx_DataInfo* const info =
+                &dctx->dataInfo.ptr[nodeInfo->inputStreamBaseIdx + n];
+        if (info->producerNodeIdx != ZL_PRODUCER_STORE || info->data == NULL) {
+            return 0;
+        }
+        storedSize += ZL_Data_contentSize(info->data);
+    }
+    return storedSize * cost;
+}
+
 static bool DCTX_isParallelDecoder(
         const ZL_DCtx* dctx,
         const DFH_NodeInfo* nodeInfo)
 {
     if (nodeInfo->fusion != NULL || nodeInfo->nbRegens != 1
-        || nodeInfo->dictIdx != ZL_DICT_INDEX_NONE
-        || nodeInfo->trpid.trt != trt_standard) {
+        || nodeInfo->dictIdx != ZL_DICT_INDEX_NONE) {
         return false;
-    }
-    switch (nodeInfo->trpid.trid) {
-        case ZL_StandardTransformID_zstd:
-        case ZL_StandardTransformID_deflate:
-        case ZL_StandardTransformID_lzma2:
-        case ZL_StandardTransformID_bzip3:
-            break;
-        default:
-            return false;
     }
     size_t const totalNbStreams = dctx->dataInfo.size;
     size_t const regenIdx       = nodeInfo->inputStreamBaseIdx
@@ -1765,15 +1810,11 @@ static bool DCTX_isParallelDecoder(
         || dctx->dataInfo.ptr[regenIdx].appendOpt != NULL) {
         return false;
     }
-    // Even small streams are worth it: these backends have a high fixed cost
-    for (size_t n = 0; n < nodeInfo->numInputStreams; n++) {
-        const ZL_DCtx_DataInfo* const info =
-                &dctx->dataInfo.ptr[nodeInfo->inputStreamBaseIdx + n];
-        if (info->producerNodeIdx != ZL_PRODUCER_STORE || info->data == NULL) {
-            return false;
-        }
-    }
-    return true;
+    // Cheap decoders aren't worth the cost of a task
+    size_t const cost = DCTX_backendDecodingCost(dctx, nodeInfo);
+    return cost > 0
+            && (cost >= DCTX_MT_MIN_DECODING_COST
+                || (dctx->mtTestingFlags & DCTX_MT_FORCE_PARALLEL));
 }
 
 /* Runs on a worker thread, or on the calling thread */
@@ -2362,6 +2403,9 @@ static ZL_Report ZL_DCtx_decompressChunk(
  * Rules:
  * - Only frames with a single serial output, and without custom decoders,
  *   are decoded this way.
+ * - Only chunks dominated by heavy codecs are decoded by chunk contexts (see
+ *   DCTX_MT_MIN_CHUNK_DECODING_COST). Other chunks are decoded by the calling
+ *   thread, when their turn comes.
  * - If a chunk context fails, the chunk is decoded again, serially, by the
  *   parent context, so errors are those of serial decoding.
  */
@@ -2396,6 +2440,7 @@ static ZL_DCtx* DCTX_acquireChild(ZL_DCtx* dctx)
         }
     }
     GDParams_copy(&child->requestedGDParams, &dctx->appliedGDParams);
+    child->mtTestingFlags = dctx->mtTestingFlags;
     child->sharedPool = DCTX_threadPool(dctx);
     child->dictLoader = dctx->dictLoader;
     if (child->sharedPool == NULL
@@ -2465,11 +2510,24 @@ static bool DCTX_prepareChunkTask(
         STREAM_free(task->output);
         return false;
     }
+    size_t cost = 0;
+    for (size_t n = 0; n < child->dfh.nbDTransforms; n++) {
+        cost += DCTX_backendDecodingCost(
+                child, &VECTOR_AT(child->dfh.nodes, n));
+    }
     task->job       = (ZL_PoolJob){ .fn = DCTX_runChunkJob, .opaque = task };
     task->child     = child;
     task->offset    = offset;
     task->chunkSize = ZL_RES_value(chunkInfo).chunkSize;
     task->result    = ZL_returnSuccess();
+    if (cost < DCTX_MT_MIN_CHUNK_DECODING_COST
+        && !(dctx->mtTestingFlags & DCTX_MT_FORCE_PARALLEL)) {
+        // Decoded serially, when its turn comes
+        DCTX_releaseChild(dctx, child);
+        STREAM_free(task->output);
+        task->child  = NULL;
+        task->output = NULL;
+    }
     return true;
 }
 
@@ -2482,6 +2540,15 @@ static ZL_Report DCTX_finishChunkTask(
         size_t frameSize)
 {
     ZL_RESULT_DECLARE_SCOPE_REPORT(dctx);
+    if (task->child == NULL) {
+        ZL_TRY_LET(
+                size_t,
+                chunkSize,
+                ZL_DCtx_decompressChunk(
+                        dctx, 1, framePtr, frameSize, task->offset));
+        ZL_ERR_IF_NE(chunkSize, task->chunkSize, logicError);
+        return ZL_returnSuccess();
+    }
     ZL_ThreadPool_waitOrRun(DCTX_threadPool(dctx), &task->job);
     ZL_Data* const output = dctx->outputs[0];
     bool success          = !ZL_isError(task->result)
@@ -2548,12 +2615,16 @@ static ZL_Report DCTX_decompressChunksMT(
                 && frameSize > nextOffset
                 && ZL_read8((const char*)framePtr + nextOffset) == 0) {
                 // A single chunk: the caller decodes it directly
-                DCTX_releaseChild(dctx, task->child);
-                STREAM_free(task->output);
+                if (task->child != NULL) {
+                    DCTX_releaseChild(dctx, task->child);
+                    STREAM_free(task->output);
+                }
                 stop = true;
                 break;
             }
-            ZL_ThreadPool_submit(DCTX_threadPool(dctx), &task->job);
+            if (task->child != NULL) {
+                ZL_ThreadPool_submit(DCTX_threadPool(dctx), &task->job);
+            }
             nbInFlight++;
         }
         if (nbInFlight == 0) {
@@ -2571,6 +2642,9 @@ static ZL_Report DCTX_decompressChunksMT(
     for (; nbInFlight > 0; nbInFlight--) {
         DCTX_ChunkTask* const task = tasks + first;
         first                      = (first + 1) % window;
+        if (task->child == NULL) {
+            continue;
+        }
         if (!ZL_ThreadPool_cancel(DCTX_threadPool(dctx), &task->job)) {
             ZL_ThreadPool_waitOrRun(DCTX_threadPool(dctx), &task->job);
         }

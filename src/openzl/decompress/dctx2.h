@@ -89,6 +89,11 @@ unsigned ZL_DCtx_getFrameFormatVersion(const ZL_DCtx* dctx);
  */
 void DCTX_preserveStreams(ZL_DCtx* dctx);
 
+/* Testing flag for multi-threaded decompression (see ZL_DParam_nbWorkers):
+ * decode in parallel whatever the decoding cost of streams and chunks */
+#define DCTX_MT_FORCE_PARALLEL 1u
+void DCTX_setMTTestingFlags(ZL_DCtx* dctx, unsigned flags);
+
 /* DCTX_runTransformID():
  * Only used for specific benchmark scenarios.
  * Requires DCTX_preserveStreams() to be enabled.
